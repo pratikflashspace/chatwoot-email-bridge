@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import re
 import requests
@@ -24,7 +25,6 @@ def auth_check(req):
         req.headers.get("Authorization", "") or
         req.args.get("secret", "")
     )
-    # Strip common prefixes
     if token.lower().startswith("bearer "):
         token = token[7:]
     if SERVICE_SECRET and token != SERVICE_SECRET:
@@ -94,23 +94,58 @@ def send_message(conversation_id, content, attachments=None):
     return {"error": resp.text, "status_code": resp.status_code}
 
 
+def extract_message_content(data):
+    """Deep-search the ClickUp webhook payload for message text."""
+    # Flatten: search all string values in the JSON recursively
+    def find_strings(obj, depth=0):
+        strings = []
+        if depth > 10:
+            return strings
+        if isinstance(obj, str) and len(obj) > 20:
+            strings.append(obj)
+        elif isinstance(obj, dict):
+            for v in obj.values():
+                strings.extend(find_strings(v, depth + 1))
+        elif isinstance(obj, list):
+            for item in obj:
+                strings.extend(find_strings(item, depth + 1))
+        return strings
+
+    all_strings = find_strings(data)
+    # Find the longest string that looks like an email draft
+    for s in sorted(all_strings, key=len, reverse=True):
+        if "Virtual Office Plan" in s or "Ready to send via Chatwoot" in s:
+            return s
+    # Fallback: stringify everything
+    full_text = json.dumps(data)
+    if "Virtual Office Plan" in full_text or "Ready to send via Chatwoot" in full_text:
+        return full_text
+    return ""
+
+
 def parse_vidhi_message(text):
     """Parse Vidhi's structured email output into fields."""
     result = {}
-    to_match = re.search(r'TO:\s*\[?([^\]\s\n]+@[^\]\s\n]+)', text)
+    # Handle both plain text and HTML-stripped content
+    # Clean up common HTML artifacts
+    clean = re.sub(r'<[^>]+>', ' ', text)
+    clean = re.sub(r'\\n', '\n', clean)
+    clean = re.sub(r'\s+', ' ', clean)
+    
+    to_match = re.search(r'TO:\s*\[?([^\]\s,]+@[^\]\s,]+)', clean, re.IGNORECASE)
     if to_match:
-        result["to_email"] = to_match.group(1).strip()
-    subj_match = re.search(r'SUBJECT:\s*(.+?)(?:\n|$)', text)
+        result["to_email"] = to_match.group(1).strip().rstrip('.')
+    
+    subj_match = re.search(r'SUBJECT:\s*(.+?)(?:\s*BODY:|\n|$)', clean, re.IGNORECASE)
     if subj_match:
         result["subject"] = subj_match.group(1).strip()
-    body_match = re.search(r'BODY:\s*\n(.*?)(?:Attachments to forward:|$)', text, re.DOTALL)
+    
+    body_match = re.search(r'BODY:\s*(.+?)(?:Attachments to forward|Ready to send via Chatwoot|$)', clean, re.IGNORECASE | re.DOTALL)
     if body_match:
-        result["body"] = body_match.group(1).strip()
-    att_section = re.search(r'Attachments to forward:\s*\n(.*?)(?:Ready to send|Reference VOS|$)', text, re.DOTALL)
-    if att_section:
-        att_text = att_section.group(1)
-        att_names = re.findall(r'[\*\-]\s*(.+?)(?:\n|$)', att_text)
-        result["attachment_names"] = [a.strip().strip('*').strip() for a in att_names if a.strip()]
+        body_text = body_match.group(1).strip()
+        if len(body_text) > 10:
+            result["body"] = body_text
+    
     return result
 
 
@@ -147,13 +182,17 @@ def send_email():
 
 @app.route("/clickup-webhook", methods=["POST"])
 def clickup_webhook():
-    # Auth check using Authorization header from ClickUp webhook
     if not auth_check(request):
         return jsonify({"error": "Unauthorized"}), 401
 
     data = request.json
     if not data:
         return jsonify({"error": "No data"}), 400
+
+    # LOG THE RAW PAYLOAD for debugging
+    print(f"=== CLICKUP WEBHOOK RAW PAYLOAD ===", file=sys.stderr)
+    print(json.dumps(data, default=str)[:3000], file=sys.stderr)
+    print(f"=== END PAYLOAD ===", file=sys.stderr)
 
     # Try direct JSON fields first
     if data.get("to_email") and data.get("subject") and data.get("body"):
@@ -162,29 +201,32 @@ def clickup_webhook():
         body = data["body"]
         attachments = data.get("attachments", [])
     else:
-        # Parse from ClickUp webhook payload
-        payload = data.get("payload", data)
-        message_content = ""
-        if isinstance(payload, dict):
-            message_content = (
-                payload.get("comment_text", "") or
-                payload.get("text", "") or
-                payload.get("content", "") or
-                (payload.get("history_items", [{}])[0].get("comment", {}).get("text_content", "") if payload.get("history_items") else "")
-            )
+        # Deep-search for message content in any nested structure
+        message_content = extract_message_content(data)
+        print(f"=== EXTRACTED CONTENT (len={len(message_content)}) ===", file=sys.stderr)
+        print(message_content[:500], file=sys.stderr)
+        print(f"=== END EXTRACTED ===", file=sys.stderr)
+
         if not message_content:
-            # Try to find content in nested structures
-            message_content = json.dumps(data) if not message_content else message_content
+            return jsonify({"skipped": True, "reason": "No email content found in payload"}), 200
+
         if "Ready to send via Chatwoot" not in message_content and "Virtual Office Plan" not in message_content:
             return jsonify({"skipped": True, "reason": "Not a Vidhi email draft"}), 200
+
         parsed = parse_vidhi_message(message_content)
+        print(f"=== PARSED FIELDS ===", file=sys.stderr)
+        print(json.dumps(parsed, default=str), file=sys.stderr)
+        print(f"=== END PARSED ===", file=sys.stderr)
+
         to_email = parsed.get("to_email")
         subject = parsed.get("subject")
         body = parsed.get("body")
         attachments = []
         if not to_email or not subject or not body:
-            return jsonify({"error": "Could not parse email fields", "parsed": parsed, "raw_snippet": message_content[:300]}), 400
+            return jsonify({"error": "Could not parse email fields", "parsed": parsed}), 400
 
+    # SEND THE EMAIL
+    print(f"=== SENDING EMAIL to {to_email}, subject: {subject} ===", file=sys.stderr)
     contact_id = find_or_create_contact(to_email)
     if not contact_id:
         return jsonify({"error": f"Failed to find/create contact for {to_email}"}), 500
