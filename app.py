@@ -19,7 +19,14 @@ HEADERS = {
 }
 
 def auth_check(req):
-    token = req.headers.get("X-Service-Secret", "") or req.args.get("secret", "")
+    token = (
+        req.headers.get("X-Service-Secret", "") or
+        req.headers.get("Authorization", "") or
+        req.args.get("secret", "")
+    )
+    # Strip common prefixes
+    if token.lower().startswith("bearer "):
+        token = token[7:]
     if SERVICE_SECRET and token != SERVICE_SECRET:
         return False
     return True
@@ -140,15 +147,22 @@ def send_email():
 
 @app.route("/clickup-webhook", methods=["POST"])
 def clickup_webhook():
+    # Auth check using Authorization header from ClickUp webhook
+    if not auth_check(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
     data = request.json
     if not data:
         return jsonify({"error": "No data"}), 400
+
+    # Try direct JSON fields first
     if data.get("to_email") and data.get("subject") and data.get("body"):
         to_email = data["to_email"]
         subject = data["subject"]
         body = data["body"]
         attachments = data.get("attachments", [])
     else:
+        # Parse from ClickUp webhook payload
         payload = data.get("payload", data)
         message_content = ""
         if isinstance(payload, dict):
@@ -159,7 +173,8 @@ def clickup_webhook():
                 (payload.get("history_items", [{}])[0].get("comment", {}).get("text_content", "") if payload.get("history_items") else "")
             )
         if not message_content:
-            return jsonify({"error": "Could not extract message content", "received": str(data)[:500]}), 400
+            # Try to find content in nested structures
+            message_content = json.dumps(data) if not message_content else message_content
         if "Ready to send via Chatwoot" not in message_content and "Virtual Office Plan" not in message_content:
             return jsonify({"skipped": True, "reason": "Not a Vidhi email draft"}), 200
         parsed = parse_vidhi_message(message_content)
@@ -168,7 +183,8 @@ def clickup_webhook():
         body = parsed.get("body")
         attachments = []
         if not to_email or not subject or not body:
-            return jsonify({"error": "Could not parse email fields", "parsed": parsed}), 400
+            return jsonify({"error": "Could not parse email fields", "parsed": parsed, "raw_snippet": message_content[:300]}), 400
+
     contact_id = find_or_create_contact(to_email)
     if not contact_id:
         return jsonify({"error": f"Failed to find/create contact for {to_email}"}), 500
