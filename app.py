@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import requests
 import base64
 from flask import Flask, request, jsonify
@@ -86,6 +87,26 @@ def send_message(conversation_id, content, attachments=None):
     return {"error": resp.text, "status_code": resp.status_code}
 
 
+def parse_vidhi_message(text):
+    """Parse Vidhi's structured email output into fields."""
+    result = {}
+    to_match = re.search(r'TO:\s*\[?([^\]\s\n]+@[^\]\s\n]+)', text)
+    if to_match:
+        result["to_email"] = to_match.group(1).strip()
+    subj_match = re.search(r'SUBJECT:\s*(.+?)(?:\n|$)', text)
+    if subj_match:
+        result["subject"] = subj_match.group(1).strip()
+    body_match = re.search(r'BODY:\s*\n(.*?)(?:Attachments to forward:|$)', text, re.DOTALL)
+    if body_match:
+        result["body"] = body_match.group(1).strip()
+    att_section = re.search(r'Attachments to forward:\s*\n(.*?)(?:Ready to send|Reference VOS|$)', text, re.DOTALL)
+    if att_section:
+        att_text = att_section.group(1)
+        att_names = re.findall(r'[\*\-]\s*(.+?)(?:\n|$)', att_text)
+        result["attachment_names"] = [a.strip().strip('*').strip() for a in att_names if a.strip()]
+    return result
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "service": "chatwoot-bridge"})
@@ -115,6 +136,49 @@ def send_email():
     if "error" in result:
         return jsonify({"error": result}), 500
     return jsonify({"success": True, "contact_id": contact_id, "conversation_id": conversation_id, "message": "Email sent via Chatwoot"})
+
+
+@app.route("/clickup-webhook", methods=["POST"])
+def clickup_webhook():
+    data = request.json
+    if not data:
+        return jsonify({"error": "No data"}), 400
+    if data.get("to_email") and data.get("subject") and data.get("body"):
+        to_email = data["to_email"]
+        subject = data["subject"]
+        body = data["body"]
+        attachments = data.get("attachments", [])
+    else:
+        payload = data.get("payload", data)
+        message_content = ""
+        if isinstance(payload, dict):
+            message_content = (
+                payload.get("comment_text", "") or
+                payload.get("text", "") or
+                payload.get("content", "") or
+                (payload.get("history_items", [{}])[0].get("comment", {}).get("text_content", "") if payload.get("history_items") else "")
+            )
+        if not message_content:
+            return jsonify({"error": "Could not extract message content", "received": str(data)[:500]}), 400
+        if "Ready to send via Chatwoot" not in message_content and "Virtual Office Plan" not in message_content:
+            return jsonify({"skipped": True, "reason": "Not a Vidhi email draft"}), 200
+        parsed = parse_vidhi_message(message_content)
+        to_email = parsed.get("to_email")
+        subject = parsed.get("subject")
+        body = parsed.get("body")
+        attachments = []
+        if not to_email or not subject or not body:
+            return jsonify({"error": "Could not parse email fields", "parsed": parsed}), 400
+    contact_id = find_or_create_contact(to_email)
+    if not contact_id:
+        return jsonify({"error": f"Failed to find/create contact for {to_email}"}), 500
+    conversation_id = create_conversation(contact_id, subject)
+    if not conversation_id:
+        return jsonify({"error": "Failed to create conversation"}), 500
+    result = send_message(conversation_id, body, attachments)
+    if "error" in result:
+        return jsonify({"error": result}), 500
+    return jsonify({"success": True, "contact_id": contact_id, "conversation_id": conversation_id, "message": f"Email sent to {to_email} via Chatwoot", "subject": subject})
 
 
 @app.route("/test", methods=["GET"])
