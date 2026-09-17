@@ -10,6 +10,7 @@ CHATWOOT_INBOX_ID = int(os.environ.get("CHATWOOT_INBOX_ID", "35"))
 SERVICE_SECRET = os.environ.get("SERVICE_SECRET", "")
 CLICKUP_API_TOKEN = os.environ.get("CLICKUP_API_TOKEN", "")
 CLICKUP_TEAM_ID = os.environ.get("CLICKUP_TEAM_ID", "1851686")
+DOC_PANEL_VIEW_ID = os.environ.get("DOC_PANEL_VIEW_ID", "1rg96-107936")
 
 HEADERS = {"api_access_token": CHATWOOT_TOKEN, "Content-Type": "application/json"}
 CLICKUP_HEADERS = {"Authorization": CLICKUP_API_TOKEN, "Content-Type": "application/json"}
@@ -117,85 +118,155 @@ def is_payment_file(filename):
     return False
 
 
-def fetch_comment_attachments_via_api(comment_id):
-    """Fetch attachments for a comment using ClickUp API v3."""
+def fetch_comment_attachments(comment_id):
+    """Fetch attachments for a ClickUp chat comment."""
     attachments = []
     if not CLICKUP_API_TOKEN:
-        print("=== No ClickUp API token ===", file=sys.stderr)
+        print("=== No ClickUp token ===", file=sys.stderr)
         return attachments
 
-    # Try v3 API: GET /api/v3/workspaces/{workspace_id}/comments/attachments
-    url = f"https://api.clickup.com/api/v3/workspaces/{CLICKUP_TEAM_ID}/comments/attachments"
-    params = {"comment_ids": comment_id}
-    print(f"=== Fetching attachments via v3: {url}?comment_ids={comment_id} ===", file=sys.stderr)
+    # Method 1: v3 entity attachments endpoint
+    url1 = f"https://api.clickup.com/api/v3/workspaces/{CLICKUP_TEAM_ID}/comments/{comment_id}/attachments"
+    print(f"=== v3 try: {url1} ===", file=sys.stderr)
     try:
-        r = requests.get(url, headers=CLICKUP_HEADERS, params=params, timeout=15)
-        print(f"=== v3 response: {r.status_code} {r.text[:500]} ===", file=sys.stderr)
+        r = requests.get(url1, headers=CLICKUP_HEADERS, timeout=15)
+        print(f"=== v3: {r.status_code} ===", file=sys.stderr)
         if r.status_code == 200:
             data = r.json()
-            for att in data.get("attachments", []):
-                url_val = att.get("url", "")
-                name = att.get("title", att.get("name", att.get("id", "file")))
+            for att in data.get("attachments", data.get("data", [])):
+                url_val = att.get("url", att.get("download_url", ""))
+                name = att.get("title", att.get("name", att.get("filename", "file")))
                 ext = att.get("extension", "")
                 if ext and not name.endswith(f".{ext}"): name = f"{name}.{ext}"
                 mime = att.get("mimetype", att.get("mime_type", "application/octet-stream"))
                 if url_val and not is_payment_file(name):
                     attachments.append({"url": url_val, "name": name, "mime": mime})
             if attachments:
+                print(f"=== v3 found {len(attachments)}: {[a['name'] for a in attachments]} ===", file=sys.stderr)
                 return attachments
     except Exception as e:
-        print(f"=== v3 error: {e} ===", file=sys.stderr)
+        print(f"=== v3 err: {e} ===", file=sys.stderr)
 
-    # Fallback: Try v2 chat view comments API to get the specific comment
-    view_id = "1rg96-107936"  # Documentation Panel view ID
-    url2 = f"https://api.clickup.com/api/v2/view/{view_id}/comment"
-    params2 = {"start_id": str(comment_id)}
-    print(f"=== Fallback v2: {url2} start_id={comment_id} ===", file=sys.stderr)
+    # Method 2: Get chat view comments via v2, parse rich text for attachment-id and image-id
+    url2 = f"https://api.clickup.com/api/v2/view/{DOC_PANEL_VIEW_ID}/comment"
+    print(f"=== v2 try: {url2} start_id={comment_id} ===", file=sys.stderr)
     try:
-        r = requests.get(url2, headers=CLICKUP_HEADERS, params=params2, timeout=15)
-        print(f"=== v2 response: {r.status_code} {r.text[:500]} ===", file=sys.stderr)
+        r = requests.get(url2, headers=CLICKUP_HEADERS, params={"start_id": str(comment_id)}, timeout=15)
+        print(f"=== v2: {r.status_code} ===", file=sys.stderr)
         if r.status_code == 200:
-            comments = r.json().get("comments", [])
+            full_response = r.json()
+            comments = full_response.get("comments", [])
+            print(f"=== v2 got {len(comments)} comments ===", file=sys.stderr)
+            
+            # Find our specific comment
+            target_comment = None
             for c in comments:
                 if str(c.get("id")) == str(comment_id):
-                    # Look for attachments in comment rich text
-                    for seg in c.get("comment", []):
-                        attrs = seg.get("attributes", {})
-                        att_id = attrs.get("attachment-id", "")
-                        att_name = attrs.get("attachment-name", "")
-                        if att_id and att_name and not is_payment_file(att_name):
+                    target_comment = c
+                    break
+            
+            if not target_comment:
+                print(f"=== Comment {comment_id} not in v2 results, trying first comment ===", file=sys.stderr)
+                if comments:
+                    target_comment = comments[0]
+            
+            if target_comment:
+                segments = target_comment.get("comment", [])
+                print(f"=== Scanning {len(segments)} segments for attachments ===", file=sys.stderr)
+                
+                for i, seg in enumerate(segments):
+                    attrs = seg.get("attributes", {})
+                    text = seg.get("text", "")
+                    seg_type = seg.get("type", "")
+                    
+                    # Check for embedded PDF/doc attachments
+                    att_id = attrs.get("attachment-id", "")
+                    att_name = attrs.get("attachment-name", "")
+                    embed_type = attrs.get("embed-type", "")
+                    
+                    if att_id:
+                        print(f"=== Segment {i}: attachment-id={att_id} name={att_name} ===", file=sys.stderr)
+                        if att_name and not is_payment_file(att_name):
                             dl_url = f"https://t{CLICKUP_TEAM_ID}.p.clickup-attachments.com/t{CLICKUP_TEAM_ID}/{att_id}"
                             attachments.append({"url": dl_url, "name": att_name, "mime": "application/octet-stream"})
-                    break
+                    
+                    # Check for inline images (Aadhaar, PAN scans)
+                    img_id = attrs.get("image-id", "")
+                    if img_id:
+                        img_ext = img_id.split(".")[-1] if "." in img_id else "jpg"
+                        img_name = f"document_{len(attachments)+1}.{img_ext}"
+                        dl_url = f"https://t{CLICKUP_TEAM_ID}.p.clickup-attachments.com/t{CLICKUP_TEAM_ID}/{img_id}"
+                        attachments.append({"url": dl_url, "name": img_name, "mime": f"image/{img_ext}"})
+                        print(f"=== Segment {i}: image-id={img_id} ===", file=sys.stderr)
+                    
+                    # Check for type=attachment segments
+                    if seg_type == "attachment" or embed_type == "attachment":
+                        if not att_id:  # not already handled
+                            print(f"=== Segment {i}: type=attachment but no att_id, attrs={json.dumps(attrs)} ===", file=sys.stderr)
+                
+                print(f"=== v2 extracted {len(attachments)} attachments ===", file=sys.stderr)
     except Exception as e:
-        print(f"=== v2 error: {e} ===", file=sys.stderr)
+        print(f"=== v2 err: {e} ===", file=sys.stderr)
 
+    # Method 3: Parse the raw webhook payload comment array as fallback
+    # (handled by caller if methods 1 and 2 fail)
+    return attachments
+
+
+def fetch_attachments_from_webhook_payload(data):
+    """Extract attachment info directly from the webhook payload's comment array."""
+    attachments = []
+    try:
+        comment_segments = data.get("payload", {}).get("data", {}).get("comment", [])
+        if not isinstance(comment_segments, list):
+            return attachments
+        
+        print(f"=== Webhook payload has {len(comment_segments)} comment segments ===", file=sys.stderr)
+        
+        for i, seg in enumerate(comment_segments):
+            attrs = seg.get("attributes", {})
+            
+            att_id = attrs.get("attachment-id", "")
+            att_name = attrs.get("attachment-name", "")
+            img_id = attrs.get("image-id", "")
+            
+            if att_id and att_name and not is_payment_file(att_name):
+                dl_url = f"https://t{CLICKUP_TEAM_ID}.p.clickup-attachments.com/t{CLICKUP_TEAM_ID}/{att_id}"
+                attachments.append({"url": dl_url, "name": att_name, "mime": "application/octet-stream"})
+                print(f"=== Webhook seg {i}: PDF {att_name} ===", file=sys.stderr)
+            
+            if img_id:
+                img_ext = img_id.split(".")[-1] if "." in img_id else "jpg"
+                img_name = f"document_{len(attachments)+1}.{img_ext}"
+                dl_url = f"https://t{CLICKUP_TEAM_ID}.p.clickup-attachments.com/t{CLICKUP_TEAM_ID}/{img_id}"
+                attachments.append({"url": dl_url, "name": img_name, "mime": f"image/{img_ext}"})
+                print(f"=== Webhook seg {i}: IMG {img_id} ===", file=sys.stderr)
+    except Exception as e:
+        print(f"=== Webhook parse err: {e} ===", file=sys.stderr)
+    
     return attachments
 
 
 def download_file(url):
-    """Download a file from URL."""
+    """Download a file from URL with ClickUp auth."""
     try:
-        headers = {"Authorization": CLICKUP_API_TOKEN} if "clickup" in url else {}
+        headers = {"Authorization": CLICKUP_API_TOKEN}
         r = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
         if r.status_code == 200 and len(r.content) > 50:
             return r.content, r.headers.get("Content-Type", "application/octet-stream")
+        print(f"=== Download {r.status_code} ({len(r.content)} bytes): {url[:80]} ===", file=sys.stderr)
     except Exception as e:
-        print(f"=== Download failed: {url}: {e} ===", file=sys.stderr)
+        print(f"=== Download err: {url[:60]}: {e} ===", file=sys.stderr)
     return None, None
 
 
-def send_chatwoot_message_with_attachments(conversation_id, content, attachment_files):
+def send_chatwoot_with_attachments(conversation_id, content, files):
     url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
-    if attachment_files:
-        files = []
-        for att in attachment_files:
-            files.append(("attachments[]", (att["name"], att["content"], att.get("content_type", "application/octet-stream"))))
-        headers_no_ct = {"api_access_token": CHATWOOT_TOKEN}
-        r = requests.post(url, headers=headers_no_ct, data={"content": content, "message_type": "outgoing", "content_type": "input_email"}, files=files)
+    if files:
+        form_files = [("attachments[]", (f["name"], f["content"], f.get("content_type", "application/octet-stream"))) for f in files]
+        r = requests.post(url, headers={"api_access_token": CHATWOOT_TOKEN}, data={"content": content, "message_type": "outgoing", "content_type": "input_email"}, files=form_files)
     else:
-        payload = {"content": content, "message_type": "outgoing", "content_type": "input_email"}
-        r = requests.post(url, headers=HEADERS, json=payload)
+        r = requests.post(url, headers=HEADERS, json={"content": content, "message_type": "outgoing", "content_type": "input_email"})
     return r.json() if r.status_code in (200, 201) else {"error": r.text}
 
 
@@ -214,22 +285,20 @@ def find_or_create_contact(email, name=None):
     return r.json().get("payload",{}).get("contact",{}).get("id") if r.status_code in (200,201) else None
 
 def create_conversation(contact_id, subject):
-    payload = {"inbox_id": CHATWOOT_INBOX_ID, "contact_id": contact_id, "status": "open", "additional_attributes": {"mail_subject": subject}}
-    r = requests.post(f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations", headers=HEADERS, json=payload)
+    r = requests.post(f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations", headers=HEADERS,
+        json={"inbox_id": CHATWOOT_INBOX_ID, "contact_id": contact_id, "status": "open", "additional_attributes": {"mail_subject": subject}})
     return r.json().get("id") if r.status_code in (200,201) else None
 
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "service": "chatwoot-bridge-v5", "clickup_token": "set" if CLICKUP_API_TOKEN else "missing"})
+    return jsonify({"status": "ok", "v": "5.1", "cu_token": "set" if CLICKUP_API_TOKEN else "no"})
 
 @app.route("/test")
 def test():
     if not auth_check(request): return jsonify({"error": "Unauthorized"}), 401
     r = requests.get(f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/inboxes", headers=HEADERS)
-    if r.status_code == 200:
-        return jsonify({"status": "connected", "inboxes": [{"id":i["id"],"name":i["name"]} for i in r.json().get("payload",[])]})
-    return jsonify({"status": "error"}), 500
+    return jsonify({"status": "connected", "inboxes": [{"id":i["id"],"name":i["name"]} for i in r.json().get("payload",[])]}) if r.status_code == 200 else jsonify({"error": "fail"}), 500
 
 @app.route("/send-email", methods=["POST"])
 def send_email():
@@ -238,12 +307,11 @@ def send_email():
     to, subj, body = d.get("to_email"), d.get("subject"), d.get("body")
     if not all([to, subj, body]): return jsonify({"error": "Missing fields"}), 400
     cid = find_or_create_contact(to, d.get("to_name"))
-    if not cid: return jsonify({"error": "Contact creation failed"}), 500
+    if not cid: return jsonify({"error": "Contact failed"}), 500
     conv = create_conversation(cid, subj)
-    if not conv: return jsonify({"error": "Conversation creation failed"}), 500
-    res = send_chatwoot_message_with_attachments(conv, body, [])
-    if "error" in res: return jsonify(res), 500
-    return jsonify({"success": True, "conversation_id": conv})
+    if not conv: return jsonify({"error": "Conv failed"}), 500
+    res = send_chatwoot_with_attachments(conv, body, [])
+    return jsonify(res) if "error" in res else jsonify({"success": True, "conversation_id": conv})
 
 
 @app.route("/clickup-webhook", methods=["POST"])
@@ -252,31 +320,29 @@ def clickup_webhook():
     data = request.json
     if not data: return jsonify({"error": "No data"}), 400
 
-    text = ""
-    comment_id = ""
+    text, comment_id = "", ""
     try:
         text = data.get("payload",{}).get("data",{}).get("text_content","")
-        comment_id = data.get("payload",{}).get("data",{}).get("id","")
+        comment_id = str(data.get("payload",{}).get("data",{}).get("id",""))
     except: pass
-    if not text: return jsonify({"skipped": True, "reason": "No text_content"}), 200
+    if not text: return jsonify({"skipped": True, "reason": "No text"}), 200
 
-    print(f"=== BOOKING (comment {comment_id}) ===\n{text[:500]}\n=== END ===", file=sys.stderr)
-
-    if "new booking" not in text.lower(): return jsonify({"skipped": True, "reason": "Not a new booking"}), 200
+    print(f"=== BOOKING (comment {comment_id}) len={len(text)} ===", file=sys.stderr)
+    if "new booking" not in text.lower(): return jsonify({"skipped": True, "reason": "Not booking"}), 200
 
     booking = parse_booking(text)
-    print(f"=== PARSED: {json.dumps(booking)} ===", file=sys.stderr)
-
     sp, loc, company = booking.get("space_partner",""), booking.get("location",""), booking.get("company_name","")
-    if not sp: return jsonify({"skipped": True, "reason": "No Space Partner"}), 200
-    if not company or "pending" in company.lower(): return jsonify({"skipped": True, "reason": f"Company pending: {company}"}), 200
+    print(f"=== PARSED: co={company} sp={sp} loc={loc} ===", file=sys.stderr)
 
-    vos_key, skip_reason = match_space_partner(sp, loc)
-    print(f"=== MATCH: sp='{sp}' loc='{loc}' -> vos='{vos_key}' skip='{skip_reason}' ===", file=sys.stderr)
-    if not vos_key: return jsonify({"skipped": True, "reason": f"Not eligible: {skip_reason}", "sp": sp}), 200
+    if not sp: return jsonify({"skipped": True, "reason": "No SP"}), 200
+    if not company or "pending" in company.lower(): return jsonify({"skipped": True, "reason": f"Pending: {company}"}), 200
+
+    vos_key, skip = match_space_partner(sp, loc)
+    print(f"=== MATCH: {vos_key} skip={skip} ===", file=sys.stderr)
+    if not vos_key: return jsonify({"skipped": True, "reason": f"Not eligible: {skip}"}), 200
 
     vos = VOS_MAPPING.get(vos_key)
-    if not vos or not vos.get("email"): return jsonify({"skipped": True, "reason": f"No email for {vos_key}"}), 200
+    if not vos or not vos.get("email"): return jsonify({"skipped": True, "reason": f"No email: {vos_key}"}), 200
 
     # Compose email
     lines = ["Dear Space Partner,", "", "Greetings, we have a Virtual Office booking for your Space.", "",
@@ -284,43 +350,45 @@ def clickup_webhook():
         f"Authorized Signatory - {booking.get('signatory','')}", f"Location - {vos['address']}",
         f"Email - {booking.get('email','')}", f"Contact - {booking.get('phone','')}",
         f"Plan - {booking.get('plan','')}",]
-    ft = booking.get("firm_type","")
-    if ft: lines.append(f"Entity Type - {ft}")
-    nb = booking.get("nature_of_business","")
-    if nb: lines.append(f"Business Description & Nature of Business - {nb}")
+    if booking.get("firm_type"): lines.append(f"Entity Type - {booking['firm_type']}")
+    if booking.get("nature_of_business"): lines.append(f"Business Description & Nature of Business - {booking['nature_of_business']}")
     lines += ["", "PFA, the required documents, kindly share the Draft Agreement to proceed further.",
         "", "Thanks and Regards,", "Naitik", "Operation Associate", "8368041681"]
     email_body = "\n".join(lines)
     subject = f"Virtual Office Plan - {company}"
 
-    # Fetch attachments using ClickUp API
-    att_list = []
-    if comment_id:
-        att_list = fetch_comment_attachments_via_api(comment_id)
-    print(f"=== API returned {len(att_list)} attachments: {[a['name'] for a in att_list]} ===", file=sys.stderr)
+    # === FETCH ATTACHMENTS (3 methods) ===
+    # Method A: Parse webhook payload directly (fastest)
+    att_list = fetch_attachments_from_webhook_payload(data)
+    print(f"=== Method A (webhook): {len(att_list)} attachments ===", file=sys.stderr)
+    
+    # Method B: ClickUp API if webhook had none
+    if not att_list and comment_id:
+        att_list = fetch_comment_attachments(comment_id)
+        print(f"=== Method B (API): {len(att_list)} attachments ===", file=sys.stderr)
 
-    # Download each attachment
+    # Download all
     downloaded = []
     for att in att_list:
         content, ct = download_file(att["url"])
         if content:
             downloaded.append({"name": att["name"], "content": content, "content_type": ct or att.get("mime","application/octet-stream")})
-            print(f"=== OK: {att['name']} ({len(content)} bytes) ===", file=sys.stderr)
+            print(f"=== DL OK: {att['name']} ({len(content)}b) ===", file=sys.stderr)
         else:
-            print(f"=== FAIL: {att['name']} ===", file=sys.stderr)
+            print(f"=== DL FAIL: {att['name']} ===", file=sys.stderr)
 
-    print(f"=== SENDING to {vos['email']}, subj: {subject}, {len(downloaded)} attachments ===", file=sys.stderr)
+    print(f"=== SENDING to {vos['email']}, {len(downloaded)}/{len(att_list)} attachments ===", file=sys.stderr)
 
-    contact_id = find_or_create_contact(vos["email"], vos_key)
-    if not contact_id: return jsonify({"error": f"Contact failed for {vos['email']}"}), 500
-    conv_id = create_conversation(contact_id, subject)
-    if not conv_id: return jsonify({"error": "Conversation failed"}), 500
-    result = send_chatwoot_message_with_attachments(conv_id, email_body, downloaded)
-    print(f"=== CHATWOOT: {json.dumps(result, default=str)[:300]} ===", file=sys.stderr)
+    cid = find_or_create_contact(vos["email"], vos_key)
+    if not cid: return jsonify({"error": f"Contact failed: {vos['email']}"}), 500
+    conv = create_conversation(cid, subject)
+    if not conv: return jsonify({"error": "Conv failed"}), 500
+    result = send_chatwoot_with_attachments(conv, email_body, downloaded)
+    print(f"=== CHATWOOT: {json.dumps(result, default=str)[:200]} ===", file=sys.stderr)
     if "error" in result: return jsonify({"error": result}), 500
 
-    return jsonify({"success": True, "to": vos["email"], "subject": subject, "space_partner": vos_key,
-        "conversation_id": conv_id, "attachments_sent": len(downloaded), "attachments_found": len(att_list)})
+    return jsonify({"success": True, "to": vos["email"], "subject": subject, "sp": vos_key,
+        "conv": conv, "att_sent": len(downloaded), "att_found": len(att_list)})
 
 
 if __name__ == "__main__":
