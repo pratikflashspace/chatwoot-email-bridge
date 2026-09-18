@@ -1,0 +1,1 @@
+Change line: is_pay = score >= 3 to is_pay = score >= 2
