@@ -1,5 +1,8 @@
-import os, sys, json, re, requests, base64, time
+import os, sys, json, re, requests, io, time
 from flask import Flask, request, jsonify
+try:
+    from PyPDF2 import PdfReader
+except: PdfReader = None
 
 app = Flask(__name__)
 
@@ -12,7 +15,17 @@ CLICKUP_API_TOKEN = os.environ.get("CLICKUP_API_TOKEN", "")
 CLICKUP_TEAM_ID = os.environ.get("CLICKUP_TEAM_ID", "1851686")
 
 HEADERS = {"api_access_token": CHATWOOT_TOKEN, "Content-Type": "application/json"}
-PAYMENT_KEYWORDS = ["payment","amount","token amount","paid","transaction","receipt","invoice","bank statement","account statement","upi","neft","imps","flash space token"]
+
+# Filename-based payment keywords
+PAYMENT_NAME_KW = ["payment","amount","token amount","paid","transaction","receipt","invoice",
+    "bank statement","account statement","upi","neft","imps","flash space token"]
+
+# Content-based payment keywords (found inside PDF text)
+PAYMENT_CONTENT_KW = ["payment successful","transaction id","transaction ref","utr no","utr:",
+    "upi ref","upi id","paid to","paid via","amount paid","total paid","razorpay","phonepe",
+    "google pay","paytm","bhim","bank transfer","neft ref","imps ref","credited","debited",
+    "account statement","bank statement","payment receipt","invoice amount","billing",
+    "amount received","payment confirmation","order id","payment id"]
 
 VOS_MAPPING = {
     "IndiraNagar - Aspire Coworks":{"email":"aspirecoworkings@gmail.com","address":"17, 7th Main Rd, Indira Nagar II Stage, Hoysala Nagar, Indiranagar, Bengaluru, Karnataka 560038, India"},
@@ -97,46 +110,101 @@ def parse_booking(text):
     for k in b: b[k]=re.sub(r'\*+','',b[k]).strip(); b[k]=re.sub(r'\[([^\]]+)\]\([^)]+\)',r'\1',b[k])
     return b
 
-def is_payment(fn): return any(kw in fn.lower() for kw in PAYMENT_KEYWORDS)
+def is_payment_by_name(fn):
+    """Check filename for payment keywords."""
+    return any(kw in fn.lower() for kw in PAYMENT_NAME_KW)
+
+def is_payment_pdf(content):
+    """Read PDF text and check if it's a payment/transaction document."""
+    if not PdfReader: return False
+    try:
+        reader = PdfReader(io.BytesIO(content))
+        text = ""
+        for page in reader.pages[:3]:  # Check first 3 pages only
+            t = page.extract_text()
+            if t: text += t.lower() + " "
+        if not text: return False
+        for kw in PAYMENT_CONTENT_KW:
+            if kw in text:
+                print(f"=== PAYMENT PDF detected: found '{kw}' ===", file=sys.stderr)
+                return True
+    except Exception as e:
+        print(f"=== PDF read err: {e} ===", file=sys.stderr)
+    return False
+
+def is_payment_image(img_obj):
+    """Heuristic: payment screenshots are usually phone-sized (tall, narrow, small file).
+    PAN/Aadhaar cards are wider (landscape or square-ish).
+    This is a rough heuristic, not perfect."""
+    try:
+        w = int(img_obj.get("width", 0))
+        h = int(img_obj.get("height", 0))
+        size = int(img_obj.get("size", 0))
+        if w == 0 or h == 0: return False
+        ratio = h / w
+        # Phone screenshots: very tall (ratio > 1.8), usually 1080x2400 or similar
+        # PAN cards: landscape or slightly tall (ratio 0.5-1.5)
+        # Aadhaar: landscape or slightly tall
+        # Payment UPI screenshots: ratio usually > 1.8 and specific phone widths
+        if ratio > 2.0 and w < 1200:
+            print(f"=== PAYMENT IMG heuristic: {w}x{h} ratio={ratio:.1f} size={size} ===", file=sys.stderr)
+            return True
+    except: pass
+    return False
 
 def extract_attachments(data):
-    """Extract ALL attachments: PDFs from seg.attachment + JPEGs from seg.image"""
+    """Extract ALL attachments, filter out payment docs."""
     atts=[]
     try:
         segs=data.get("payload",{}).get("data",{}).get("comment",[])
         img_count=0
         for seg in segs:
-            stype=seg.get("type","")
-            # PDFs/docs: type=attachment, data in seg.attachment
+            # PDFs/docs
             att_obj=seg.get("attachment")
             if isinstance(att_obj,dict) and att_obj.get("url"):
                 name=att_obj.get("title",att_obj.get("name","file"))
-                if not is_payment(name):
-                    atts.append({"url":att_obj["url"],"name":name,"mime":att_obj.get("mime_type","application/octet-stream")})
-                    print(f"=== PDF: {name} ===",file=sys.stderr)
-            # Images (PAN/Aadhaar scans): type=image, data in seg.image
+                if not is_payment_by_name(name):
+                    atts.append({"url":att_obj["url"],"name":name,"mime":att_obj.get("mime_type","application/octet-stream"),"check_content":True})
+                else:
+                    print(f"=== SKIP (name): {name} ===",file=sys.stderr)
+            # Images
             img_obj=seg.get("image")
             if isinstance(img_obj,dict) and img_obj.get("url"):
                 img_count+=1
                 ext=img_obj.get("extension","jpg")
                 name=img_obj.get("title",f"document_{img_count}.{ext}")
-                # Rename generic "image.jpg" to "document_N.jpg"
                 if name in ("image.jpg","image.jpeg","image.png"): name=f"document_{img_count}.{ext}"
-                if not is_payment(name):
-                    atts.append({"url":img_obj["url"],"name":name,"mime":img_obj.get("mime_type",f"image/{ext}")})
-                    print(f"=== IMG: {name} url={img_obj['url'][:60]} ===",file=sys.stderr)
+                if is_payment_by_name(name):
+                    print(f"=== SKIP IMG (name): {name} ===",file=sys.stderr)
+                elif is_payment_image(img_obj):
+                    print(f"=== SKIP IMG (heuristic): {name} ===",file=sys.stderr)
+                else:
+                    atts.append({"url":img_obj["url"],"name":name,"mime":img_obj.get("mime_type",f"image/{ext}"),"check_content":False})
     except Exception as e:
         print(f"=== Extract err: {e} ===",file=sys.stderr)
-    print(f"=== TOTAL: {len(atts)} attachments ({sum(1 for a in atts if 'image' in a.get('mime',''))} images, {sum(1 for a in atts if 'image' not in a.get('mime',''))} docs) ===",file=sys.stderr)
+    print(f"=== EXTRACTED: {len(atts)} attachments ===",file=sys.stderr)
     return atts
 
-def download_file(url):
-    try:
-        r=requests.get(url,headers={"Authorization":CLICKUP_API_TOKEN},timeout=30,allow_redirects=True)
-        if r.status_code==200 and len(r.content)>50: return r.content,r.headers.get("Content-Type","application/octet-stream")
-        print(f"=== DL {r.status_code} {len(r.content)}b: {url[:80]} ===",file=sys.stderr)
-    except Exception as e: print(f"=== DL err: {e} ===",file=sys.stderr)
-    return None,None
+def download_and_filter(atts):
+    """Download attachments, filter payment PDFs by content."""
+    result=[]
+    for a in atts:
+        try:
+            r=requests.get(a["url"],headers={"Authorization":CLICKUP_API_TOKEN},timeout=30,allow_redirects=True)
+            if r.status_code!=200 or len(r.content)<50:
+                print(f"=== DL FAIL: {a['name']} {r.status_code} ===",file=sys.stderr); continue
+            content=r.content
+            ct=r.headers.get("Content-Type",a["mime"])
+            # Check PDF content for payment keywords
+            if a.get("check_content") and ("pdf" in ct.lower() or a["name"].lower().endswith(".pdf")):
+                if is_payment_pdf(content):
+                    print(f"=== SKIP PDF (content): {a['name']} ===",file=sys.stderr)
+                    continue
+            result.append({"name":a["name"],"content":content,"ct":ct})
+            print(f"=== OK: {a['name']} ({len(content)}b) ===",file=sys.stderr)
+        except Exception as e:
+            print(f"=== DL err {a['name']}: {e} ===",file=sys.stderr)
+    return result
 
 def send_chatwoot(conv,content,files):
     url=f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conv}/messages"
@@ -167,7 +235,7 @@ def create_conv(cid,subj):
     return r.json().get("id") if r.status_code in (200,201) else None
 
 @app.route("/health")
-def health(): return jsonify({"v":"6.0","ok":True})
+def health(): return jsonify({"v":"7.0","ok":True,"pdf_reader":"yes" if PdfReader else "no"})
 
 @app.route("/clickup-webhook",methods=["POST"])
 def clickup_webhook():
@@ -200,11 +268,7 @@ def clickup_webhook():
     subj=f"Virtual Office Plan - {co}"
 
     atts=extract_attachments(data)
-    dls=[]
-    for a in atts:
-        c,ct=download_file(a["url"])
-        if c: dls.append({"name":a["name"],"content":c,"ct":ct or a["mime"]}); print(f"=== OK {a['name']} {len(c)}b ===",file=sys.stderr)
-        else: print(f"=== FAIL {a['name']} ===",file=sys.stderr)
+    dls=download_and_filter(atts)
 
     print(f"=== SEND {vos['email']}: {len(dls)}/{len(atts)} ===",file=sys.stderr)
     cid=find_or_create_contact(vos["email"],vk)
