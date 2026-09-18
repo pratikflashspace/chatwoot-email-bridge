@@ -10,7 +10,6 @@ except:
     HAS_PIL = False
 
 app = Flask(__name__)
-
 CHATWOOT_URL = os.environ.get("CHATWOOT_URL", "")
 CHATWOOT_TOKEN = os.environ.get("CHATWOOT_TOKEN", "")
 CHATWOOT_ACCOUNT_ID = os.environ.get("CHATWOOT_ACCOUNT_ID", "1")
@@ -18,15 +17,16 @@ CHATWOOT_INBOX_ID = int(os.environ.get("CHATWOOT_INBOX_ID", "35"))
 SERVICE_SECRET = os.environ.get("SERVICE_SECRET", "")
 CLICKUP_API_TOKEN = os.environ.get("CLICKUP_API_TOKEN", "")
 CLICKUP_TEAM_ID = os.environ.get("CLICKUP_TEAM_ID", "1851686")
-
 HEADERS = {"api_access_token": CHATWOOT_TOKEN, "Content-Type": "application/json"}
 MAX_PDF_SCAN = 3*1024*1024
+
+# In-memory dedup: track sent emails in last 24h (survives until service restart)
+SENT_EMAILS = {}  # key: "company_name|space_partner_email" -> timestamp
+DEDUP_WINDOW = 86400  # 24 hours in seconds
 
 PAYMENT_NAME_KW = ["payment","amount","token amount","paid","transaction","receipt","invoice","bank statement","account statement","upi","neft","imps","flash space token"]
 PAYMENT_CONTENT_KW = ["payment successful","transaction id","transaction ref","utr no","utr:","upi ref","upi id","paid to","paid via","amount paid","total paid","razorpay","phonepe","google pay","paytm","bhim","bank transfer","neft ref","imps ref","credited","debited","account statement","bank statement","payment receipt","invoice amount","amount received","payment confirmation","order id","payment id","money transfer","fund transfer","transaction successful","txn id","amount debited","amount credited","net banking","total amount"]
 KYC_KEYWORDS = ["aadhaar","aadhar","pan card","permanent account number","income tax","election commission","voter id","passport","driving licence","driving license","identity card","uid","unique identification","govt of india","government of india","ministry of","certificate of incorporation","memorandum","articles of association","gst certificate","gstin","registration certificate","company pan"]
-
-# PDFs with these name patterns are screenshots saved as PDF (payment screenshots)
 SCREENSHOT_PDF_PATTERNS = [r'^image\s*\(\d+\)\.pdf$', r'^image\s*\d+\.pdf$', r'^screenshot', r'^img_', r'^photo_']
 
 VOS_MAPPING = {"IndiraNagar - Aspire Coworks":{"email":"aspirecoworkings@gmail.com","address":"17, 7th Main Rd, Indira Nagar II Stage, Hoysala Nagar, Indiranagar, Bengaluru, Karnataka 560038, India"},"Koramangala - Aspire Coworks":{"email":"aspirecoworkings@gmail.com","address":"2nd & 3rd Floor, Balaji Arcade, 472/7, 20th L Cross Rd, 4th Block, Koramangala, Bengaluru, Karnataka 560095, India"},"EcoSpace - Hebbal, HMT Layout":{"email":"ecospaceblr@gmail.com","address":"No,33, 4th Floor, 1st Main, CBI Main Rd, HMT Layout, Ganganagar, Bengaluru, Karnataka 560032, India"},"Laksh Space - Hebbal, HMT layout":{"email":"Lakshspaceblr@gmail.com","address":"No,33, 1st Floor, 1st Main, CBI Main Rd, HMT Layout, Ganganagar, Bengaluru, Karnataka 560032, India"},"RegisterKaro - Old Airport Road":{"email":"rupeshrai@registerkaro.com","address":"Unit 101, Oxford Towers, No. 139 Old Airport Road, Bengaluru-560008"},"Getset Spaces - Green Park":{"email":"booking.del@getsetoffice.in","address":"Commercial Complex, 400A, 4th Floor, 12 Ajit Singh House, Yusuf Sarai, Green Park, New Delhi, Delhi 110016"},"CP Alt F":{"email":None,"address":"J6JF+53C, Connaught Lane, Barakhamba, New Delhi, Delhi 110001, India"},"Mytime Cowork - Saket":{"email":"Sales@mytimeco.work","address":"55 Lane-2, Westend Marg, Saiyad Ul Ajaib Village, Saket, New Delhi, Delhi 110030, India"},"Okhla Alt F":{"email":None,"address":"101, NH-19, CRRI, Ishwar Nagar, Okhla, New Delhi, Delhi 110044, India"},"WBB Office":{"email":"Info@wbboffice.com","address":"Room no 1 No. 19, Metro Station, 35, Anna Salai, near Little Mount, Little Mount, Nandanam, Chennai, Tamil Nadu 600015, India"},"MSB Cospazes":{"email":"msbcospazesofficials@gmail.com","address":"No.26-27-A, H- Block, Third Floor, (Office No.401 & 404) Vikas Marg, Laxmi Nagar, Delhi-110092"},"RegisterKaro - Okhla":{"email":"rupeshrai@registerkaro.com","address":"808B, DLF Prime Tower, Pocket F, Okhla Phase I, Okhla Industrial Estate, New Delhi, Delhi 110020"},"Getset Spaces - Gurgaon":{"email":"booking.ggn@getsetoffice.in","address":"Unit No. 309, 3rd Floor, Tower-A of Eleven Bay (Former SAS Tower), Support Area, Medicity, Sector-38, Gurgaon 122001"},"Infrapro - Sector 44":{"email":"nitish@infraprospaces.com","address":"Plot no 4, 2nd floor, Minarch Tower, Sector 44, Gurugram, Haryana 122003, India"},"TEAM COWORK - Palm Court":{"email":"virtualoffice@teamco.work","address":"Mehrauli Rd, Gurugram, Haryana 122022, India"},"The Work Lounge - Sector 66":{"email":"theworkloungen@gmail.com","address":"02-007, 2nd Floor, Emar The Palm Square, Sector 66, Golf Course Road, Extension, Gurugram, Haryana, 122102"},"MSB COspaze - Bhondsi":{"email":"msbcospazesofficials@gmail.com","address":"2nd Floor, Sona Marble Building, Sneh Vihar, Bhondsi, Gurgaon - 122102"},"Click Office - Sector 2":{"email":"Hr@clickoffice.in","address":"B-128, B Block, Sector 2, Noida, Uttar Pradesh 201301"},"Crystaa - Sector 63":{"email":"crystatower@gmail.com","address":"63m, Ivent, C-030, C Block, Sector 63, Noida, Hazratpur Wajidpur, Uttar Pradesh 201309, India"},"Workshala - Sector 3":{"email":"mohitbhargav28@gmail.com","address":"D-9, Vyapar Marg, Block D, Noida Sector 3, Noida, Uttar Pradesh 201301, India"},"RegisterKaro - Sector 90":{"email":"rupeshrai@registerkaro.com","address":"603 604, FLOOR 6th, TOWER B BHUTANI ALPHATHUM, SECTOR 90, NOIDA, 201305."},"Alt F - Sector 62":{"email":None,"address":"C-20, 1/1A, Coast Guard Golf Ground Rd, C Block, Phase 2, Industrial Area, Sector 62, Noida, Uttar Pradesh 201309"},"Alt F - Sector 142":{"email":None,"address":"Ground Floor, Plot No. 21 & 21A, Sector 142, Noida, Uttar Pradesh 201304"},"Alt F - Sector 58":{"email":None,"address":"A100, A Block, Sector 58, Noida, Uttar Pradesh 201309"},"Alt F - Sector 68":{"email":None,"address":"A-5, Grovy Optiva, Block A, Sector 68, Noida, Basi Bahuddin Nagar, Uttar Pradesh 201316"},"Naitik Get Set Office":{"email":"naitikkr32@gmail.com","address":"648/4 DEVLI VILLAGE BANGALORE - 110062 1 FLOOR"}}
@@ -86,14 +86,10 @@ def parse_booking(text):
     return b
 
 def is_payment_by_name(fn): return any(kw in fn.lower() for kw in PAYMENT_NAME_KW)
-
 def is_screenshot_pdf_name(fn):
-    """Check if PDF name looks like a screenshot saved as PDF."""
-    fn_lower = fn.lower().strip()
     for pat in SCREENSHOT_PDF_PATTERNS:
-        if re.match(pat, fn_lower): return True
+        if re.match(pat, fn.lower().strip()): return True
     return False
-
 def check_text_for_payment(text):
     t=text.lower()
     for kw in KYC_KEYWORDS:
@@ -103,33 +99,24 @@ def check_text_for_payment(text):
     return False
 
 def is_payment_pdf(content, name=""):
-    # Rule 1: Screenshot-named PDFs are always payment
-    if is_screenshot_pdf_name(name):
-        print(f"=== SCREENSHOT PDF (name pattern): {name} ===",file=sys.stderr)
-        return True
-    # Rule 2: Read PDF text
+    if is_screenshot_pdf_name(name): print(f"=== SCREENSHOT PDF: {name} ===",file=sys.stderr); return True
     if not PdfReader or len(content)>MAX_PDF_SCAN: return False
     try:
         reader=PdfReader(io.BytesIO(content)); text=""
         for page in reader.pages[:2]:
             try: t=page.extract_text(); text+=t+" " if t else ""
             except: pass
-        # Rule 3: Small PDF (<200KB) with no extractable text = image-only PDF = likely screenshot
-        if not text.strip() and len(content)<200*1024:
-            print(f"=== SCREENSHOT PDF (empty text, small): {name} ({len(content)}b) ===",file=sys.stderr)
-            return True
-        if text.strip() and check_text_for_payment(text):
-            print(f"=== PAYMENT PDF (text match): {name} ===",file=sys.stderr)
-            return True
-    except Exception as e: print(f"=== PDF err: {e} ===",file=sys.stderr)
+        if not text.strip() and len(content)<200*1024: print(f"=== SCREENSHOT PDF (empty): {name} ===",file=sys.stderr); return True
+        if text.strip() and check_text_for_payment(text): print(f"=== PAYMENT PDF: {name} ===",file=sys.stderr); return True
+    except: pass
     return False
 
 def is_payment_image(content, img_meta=None):
     score=0; w=int(img_meta.get("width",0)) if img_meta else 0; h=int(img_meta.get("height",0)) if img_meta else 0
     if w>0 and h>0:
         ratio=h/w
-        if ratio>1.7: score+=2; print(f"=== IMG {w}x{h} ratio={ratio:.1f}: PHONE (+2) ===",file=sys.stderr)
-        elif ratio<1.2: score-=3; print(f"=== IMG {w}x{h} ratio={ratio:.1f}: CARD (-3) ===",file=sys.stderr)
+        if ratio>1.7: score+=2
+        elif ratio<1.2: score-=3
     if HAS_PIL and content:
         try:
             img=Image.open(io.BytesIO(content)).convert("RGB"); img.thumbnail((200,200)); px=list(img.getdata()); n=len(px)
@@ -139,11 +126,24 @@ def is_payment_image(content, img_meta=None):
                 if g>8: score+=2
                 if g>15: score+=1
                 if bl>10: score-=2
-                print(f"=== IMG green={g:.0f}% blue={bl:.0f}% score={score} ===",file=sys.stderr)
         except: pass
-    is_pay=score>=2
-    if is_pay: print(f"=== PAYMENT IMAGE score={score} ===",file=sys.stderr)
-    return is_pay
+    return score>=2
+
+def is_duplicate(company, sp_email):
+    """Check if we already sent an email for this company to this Space Partner."""
+    key = f"{company.lower().strip()}|{sp_email.lower().strip()}"
+    now = time.time()
+    # Clean old entries
+    expired = [k for k,v in SENT_EMAILS.items() if now-v > DEDUP_WINDOW]
+    for k in expired: del SENT_EMAILS[k]
+    if key in SENT_EMAILS:
+        print(f"=== DUPLICATE: {key} (sent {int(now-SENT_EMAILS[key])}s ago) ===",file=sys.stderr)
+        return True
+    return False
+
+def mark_sent(company, sp_email):
+    key = f"{company.lower().strip()}|{sp_email.lower().strip()}"
+    SENT_EMAILS[key] = time.time()
 
 def extract_attachments(data):
     atts=[]; segs=data.get("payload",{}).get("data",{}).get("comment",[]); ic=0
@@ -158,7 +158,6 @@ def extract_attachments(data):
             ic+=1; ext=io2.get("extension","jpg"); nm=io2.get("title",f"doc_{ic}.{ext}")
             if nm in ("image.jpg","image.jpeg","image.png"): nm=f"doc_{ic}.{ext}"
             if not is_payment_by_name(nm): atts.append({"url":io2["url"],"name":nm,"mime":io2.get("mime_type",f"image/{ext}"),"type":"image","meta":io2})
-    print(f"=== EXTRACTED: {len(atts)} ===",file=sys.stderr)
     return atts
 
 def download_and_filter(atts):
@@ -169,12 +168,12 @@ def download_and_filter(atts):
             if r.status_code!=200 or len(r.content)<50: continue
             c=r.content; ct=r.headers.get("Content-Type",a["mime"])
             if "pdf" in ct.lower() or a["name"].lower().endswith(".pdf"):
-                if is_payment_pdf(c, a["name"]): print(f"=== SKIP PDF: {a['name']} ===",file=sys.stderr); continue
+                if is_payment_pdf(c, a["name"]): continue
             elif a["type"]=="image":
                 if is_payment_image(c,a.get("meta",{})): print(f"=== SKIP IMG: {a['name']} ===",file=sys.stderr); continue
             res.append({"name":a["name"],"content":c,"ct":ct})
             print(f"=== OK: {a['name']} ({len(c)}b) ===",file=sys.stderr)
-        except Exception as e: print(f"=== err: {e} ===",file=sys.stderr)
+        except: pass
     return res
 
 def send_chatwoot(conv,content,files):
@@ -204,7 +203,7 @@ def create_conv(cid,subj):
     return r.json().get("id") if r.status_code in (200,201) else None
 
 @app.route("/health")
-def health(): return jsonify({"v":"9.2","ok":True})
+def health(): return jsonify({"v":"9.3","ok":True,"dedup_entries":len(SENT_EMAILS)})
 
 @app.route("/clickup-webhook",methods=["POST"])
 def clickup_webhook():
@@ -222,6 +221,11 @@ def clickup_webhook():
     if not vk: return jsonify({"skip":True,"r":skip}),200
     vos=VOS_MAPPING.get(vk)
     if not vos or not vos.get("email"): return jsonify({"skip":True}),200
+
+    # DUPLICATE CHECK: only 1 email per company per Space Partner
+    if is_duplicate(co, vos["email"]):
+        return jsonify({"skip":True,"reason":"DUPLICATE - already sent for this booking"}),200
+
     lines=["Dear Space Partner,","","Greetings, we have a Virtual Office booking for your Space.","",f"Company Name - {co}",f"Space Partner - {vk}",f"Authorized Signatory - {bk.get('signatory','')}",f"Location - {vos['address']}",f"Email - {bk.get('email','')}",f"Contact - {bk.get('phone','')}",f"Plan - {bk.get('plan','')}",]
     if bk.get("firm_type"): lines.append(f"Entity Type - {bk['firm_type']}")
     if bk.get("nature_of_business"): lines.append(f"Business Description & Nature of Business - {bk['nature_of_business']}")
@@ -235,6 +239,8 @@ def clickup_webhook():
     if not conv: return jsonify({"error":"conv"}),500
     res=send_chatwoot(conv,body,dls)
     if "error" in res: return jsonify(res),500
+    # Mark as sent to prevent duplicates
+    mark_sent(co, vos["email"])
     return jsonify({"ok":True,"to":vos["email"],"sent":len(dls),"found":len(atts)})
 
 if __name__=="__main__": app.run(host="0.0.0.0",port=int(os.environ.get("PORT",10000)))
