@@ -4,11 +4,10 @@ try:
     from PyPDF2 import PdfReader
 except: PdfReader = None
 try:
-    import pytesseract
     from PIL import Image
-    HAS_OCR = True
+    HAS_PIL = True
 except:
-    HAS_OCR = False
+    HAS_PIL = False
 
 app = Flask(__name__)
 
@@ -21,21 +20,17 @@ CLICKUP_API_TOKEN = os.environ.get("CLICKUP_API_TOKEN", "")
 CLICKUP_TEAM_ID = os.environ.get("CLICKUP_TEAM_ID", "1851686")
 
 HEADERS = {"api_access_token": CHATWOOT_TOKEN, "Content-Type": "application/json"}
-
-MAX_PDF_SCAN_SIZE = 3 * 1024 * 1024  # 3MB max for PDF content scanning
-MAX_IMG_SCAN_SIZE = 2 * 1024 * 1024  # 2MB max for image OCR
+MAX_PDF_SCAN = 3*1024*1024
 
 PAYMENT_NAME_KW = ["payment","amount","token amount","paid","transaction","receipt","invoice",
     "bank statement","account statement","upi","neft","imps","flash space token"]
-
 PAYMENT_CONTENT_KW = ["payment successful","transaction id","transaction ref","utr no","utr:",
     "upi ref","upi id","paid to","paid via","amount paid","total paid","razorpay","phonepe",
     "google pay","paytm","bhim","bank transfer","neft ref","imps ref","credited","debited",
     "account statement","bank statement","payment receipt","invoice amount",
     "amount received","payment confirmation","order id","payment id",
-    "money transfer","fund transfer","transaction successful","txn id","ref no",
+    "money transfer","fund transfer","transaction successful","txn id",
     "amount debited","amount credited","net banking","total amount"]
-
 KYC_KEYWORDS = ["aadhaar","aadhar","pan card","permanent account number","income tax",
     "election commission","voter id","passport","driving licence","driving license",
     "identity card","uid","unique identification","govt of india","government of india",
@@ -128,7 +123,7 @@ def parse_booking(text):
 def is_payment_by_name(fn): return any(kw in fn.lower() for kw in PAYMENT_NAME_KW)
 
 def check_text_for_payment(text):
-    t = text.lower()
+    t=text.lower()
     for kw in KYC_KEYWORDS:
         if kw in t: return False
     for kw in PAYMENT_CONTENT_KW:
@@ -136,42 +131,80 @@ def check_text_for_payment(text):
     return False
 
 def is_payment_pdf(content):
-    if not PdfReader: return False
-    if len(content) > MAX_PDF_SCAN_SIZE:
-        print(f"=== PDF too large ({len(content)}b), skip scan ===", file=sys.stderr)
-        return False  # Too big to scan safely, assume it's a legit document
+    if not PdfReader or len(content)>MAX_PDF_SCAN: return False
     try:
-        reader = PdfReader(io.BytesIO(content))
-        text = ""
-        for page in reader.pages[:2]:  # Only first 2 pages
+        reader=PdfReader(io.BytesIO(content))
+        text=""
+        for page in reader.pages[:2]:
             try:
-                t = page.extract_text()
-                if t: text += t + " "
+                t=page.extract_text()
+                if t: text+=t+" "
             except: pass
         if not text.strip(): return False
-        result = check_text_for_payment(text)
-        if result: print(f"=== PAYMENT PDF detected ===", file=sys.stderr)
-        return result
+        r=check_text_for_payment(text)
+        if r: print(f"=== PAYMENT PDF ===",file=sys.stderr)
+        return r
     except Exception as e:
-        print(f"=== PDF err: {e} ===", file=sys.stderr)
+        print(f"=== PDF err: {e} ===",file=sys.stderr)
     return False
 
-def is_payment_image_ocr(content):
-    if not HAS_OCR: return False
-    if len(content) > MAX_IMG_SCAN_SIZE:
-        print(f"=== IMG too large ({len(content)}b), skip OCR ===", file=sys.stderr)
-        return False
-    try:
-        img = Image.open(io.BytesIO(content))
-        img.thumbnail((800, 800))  # Smaller resize for memory safety
-        text = pytesseract.image_to_string(img, lang='eng', timeout=8)
-        if not text.strip(): return False
-        result = check_text_for_payment(text)
-        if result: print(f"=== PAYMENT IMG (OCR) ===", file=sys.stderr)
-        return result
-    except Exception as e:
-        print(f"=== OCR err: {e} ===", file=sys.stderr)
-    return False
+def is_payment_image(content, img_meta=None):
+    """Detect payment screenshots using aspect ratio + green color analysis.
+    Payment screenshots (Google Pay, PhonePe, Paytm): tall phone screens with green success indicators.
+    KYC docs (PAN, Aadhaar): landscape cards or standard document shapes."""
+    score = 0
+    w = int(img_meta.get("width",0)) if img_meta else 0
+    h = int(img_meta.get("height",0)) if img_meta else 0
+    
+    # Check 1: Aspect ratio from metadata (no download needed for this check)
+    if w > 0 and h > 0:
+        ratio = h / w
+        # Phone screenshots: very tall (ratio > 1.7), typically 9:16 or taller
+        if ratio > 1.7:
+            score += 2
+            print(f"=== IMG ratio {ratio:.1f} ({w}x{h}): phone-like (+2) ===", file=sys.stderr)
+        # Document/card shaped (landscape or mild portrait): likely KYC
+        elif ratio < 1.2:
+            score -= 3  # Very likely a card/document
+            print(f"=== IMG ratio {ratio:.1f} ({w}x{h}): card-like (-3) ===", file=sys.stderr)
+    
+    # Check 2: Green color analysis (payment apps use green for success)
+    if HAS_PIL and content:
+        try:
+            img = Image.open(io.BytesIO(content)).convert("RGB")
+            img.thumbnail((200, 200))  # Tiny for fast analysis
+            pixels = list(img.getdata())
+            total = len(pixels)
+            if total > 0:
+                # Count green-dominant pixels (G > R*1.3 and G > B*1.3 and G > 80)
+                green_count = sum(1 for r,g,b in pixels if g > r*1.3 and g > b*1.3 and g > 80)
+                green_pct = green_count / total * 100
+                # Count white pixels (all > 220) - payment screens often have white backgrounds
+                white_count = sum(1 for r,g,b in pixels if r>220 and g>220 and b>220)
+                white_pct = white_count / total * 100
+                
+                if green_pct > 8:  # More than 8% green
+                    score += 2
+                    print(f"=== IMG green={green_pct:.1f}% (+2) ===", file=sys.stderr)
+                if green_pct > 15:  # Very green
+                    score += 1
+                    print(f"=== IMG very green={green_pct:.1f}% (+1) ===", file=sys.stderr)
+                    
+                # Blue tint (PAN card is blue, Aadhaar has blue elements)
+                blue_count = sum(1 for r,g,b in pixels if b > r*1.2 and b > g*1.1 and b > 80)
+                blue_pct = blue_count / total * 100
+                if blue_pct > 10:  # Blue dominant = likely KYC
+                    score -= 2
+                    print(f"=== IMG blue={blue_pct:.1f}% (-2, KYC likely) ===", file=sys.stderr)
+                
+                print(f"=== IMG colors: green={green_pct:.1f}% blue={blue_pct:.1f}% white={white_pct:.1f}% score={score} ===", file=sys.stderr)
+        except Exception as e:
+            print(f"=== IMG analysis err: {e} ===", file=sys.stderr)
+    
+    # Score >= 3 = payment, score < 3 = keep as document
+    is_pay = score >= 3
+    if is_pay: print(f"=== PAYMENT IMAGE (score={score}) ===", file=sys.stderr)
+    return is_pay
 
 def extract_attachments(data):
     atts=[]
@@ -183,7 +216,7 @@ def extract_attachments(data):
             if isinstance(att_obj,dict) and att_obj.get("url"):
                 name=att_obj.get("title",att_obj.get("name","file"))
                 if not is_payment_by_name(name):
-                    atts.append({"url":att_obj["url"],"name":name,"mime":att_obj.get("mime_type","application/octet-stream"),"type":"doc"})
+                    atts.append({"url":att_obj["url"],"name":name,"mime":att_obj.get("mime_type","application/octet-stream"),"type":"doc","meta":att_obj})
                 else:
                     print(f"=== SKIP (name): {name} ===",file=sys.stderr)
             img_obj=seg.get("image")
@@ -193,12 +226,12 @@ def extract_attachments(data):
                 name=img_obj.get("title",f"document_{img_count}.{ext}")
                 if name in ("image.jpg","image.jpeg","image.png"): name=f"document_{img_count}.{ext}"
                 if not is_payment_by_name(name):
-                    atts.append({"url":img_obj["url"],"name":name,"mime":img_obj.get("mime_type",f"image/{ext}"),"type":"image"})
+                    atts.append({"url":img_obj["url"],"name":name,"mime":img_obj.get("mime_type",f"image/{ext}"),"type":"image","meta":img_obj})
                 else:
                     print(f"=== SKIP IMG (name): {name} ===",file=sys.stderr)
     except Exception as e:
         print(f"=== Extract err: {e} ===",file=sys.stderr)
-    print(f"=== EXTRACTED: {len(atts)} attachments ===",file=sys.stderr)
+    print(f"=== EXTRACTED: {len(atts)} ===",file=sys.stderr)
     return atts
 
 def download_and_filter(atts):
@@ -207,21 +240,20 @@ def download_and_filter(atts):
         try:
             r=requests.get(a["url"],headers={"Authorization":CLICKUP_API_TOKEN},timeout=30,allow_redirects=True)
             if r.status_code!=200 or len(r.content)<50:
-                print(f"=== DL FAIL: {a['name']} {r.status_code} ===",file=sys.stderr); continue
-            content=r.content
-            ct=r.headers.get("Content-Type",a["mime"])
-            # Check PDFs (only small ones)
+                print(f"=== DL FAIL: {a['name']} ===",file=sys.stderr); continue
+            content=r.content; ct=r.headers.get("Content-Type",a["mime"])
+            # PDF: read text to check
             if "pdf" in ct.lower() or a["name"].lower().endswith(".pdf"):
                 if is_payment_pdf(content):
-                    print(f"=== SKIP PDF (content): {a['name']} ===",file=sys.stderr); continue
-            # Check images by OCR (only small ones)
-            elif a["type"]=="image" or "image" in ct.lower():
-                if is_payment_image_ocr(content):
-                    print(f"=== SKIP IMG (OCR): {a['name']} ===",file=sys.stderr); continue
+                    print(f"=== SKIP PDF: {a['name']} ===",file=sys.stderr); continue
+            # Image: use aspect ratio + color analysis
+            elif a["type"]=="image":
+                if is_payment_image(content, a.get("meta",{})):
+                    print(f"=== SKIP IMG: {a['name']} ===",file=sys.stderr); continue
             result.append({"name":a["name"],"content":content,"ct":ct})
             print(f"=== OK: {a['name']} ({len(content)}b) ===",file=sys.stderr)
         except Exception as e:
-            print(f"=== DL err {a['name']}: {e} ===",file=sys.stderr)
+            print(f"=== err {a['name']}: {e} ===",file=sys.stderr)
     return result
 
 def send_chatwoot(conv,content,files):
@@ -253,7 +285,7 @@ def create_conv(cid,subj):
     return r.json().get("id") if r.status_code in (200,201) else None
 
 @app.route("/health")
-def health(): return jsonify({"v":"8.1","ok":True,"pdf":"yes" if PdfReader else "no","ocr":"yes" if HAS_OCR else "no"})
+def health(): return jsonify({"v":"9.0","ok":True,"pdf":"yes" if PdfReader else "no","pil":"yes" if HAS_PIL else "no"})
 
 @app.route("/clickup-webhook",methods=["POST"])
 def clickup_webhook():
