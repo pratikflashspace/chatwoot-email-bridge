@@ -22,19 +22,20 @@ CLICKUP_TEAM_ID = os.environ.get("CLICKUP_TEAM_ID", "1851686")
 
 HEADERS = {"api_access_token": CHATWOOT_TOKEN, "Content-Type": "application/json"}
 
+MAX_PDF_SCAN_SIZE = 3 * 1024 * 1024  # 3MB max for PDF content scanning
+MAX_IMG_SCAN_SIZE = 2 * 1024 * 1024  # 2MB max for image OCR
+
 PAYMENT_NAME_KW = ["payment","amount","token amount","paid","transaction","receipt","invoice",
     "bank statement","account statement","upi","neft","imps","flash space token"]
 
-# Keywords to detect payment content inside PDFs and images
 PAYMENT_CONTENT_KW = ["payment successful","transaction id","transaction ref","utr no","utr:",
     "upi ref","upi id","paid to","paid via","amount paid","total paid","razorpay","phonepe",
     "google pay","paytm","bhim","bank transfer","neft ref","imps ref","credited","debited",
     "account statement","bank statement","payment receipt","invoice amount",
     "amount received","payment confirmation","order id","payment id",
     "money transfer","fund transfer","transaction successful","txn id","ref no",
-    "amount debited","amount credited","net banking","wallet","total amount"]
+    "amount debited","amount credited","net banking","total amount"]
 
-# Keywords that identify KYC documents (these should NOT be skipped)
 KYC_KEYWORDS = ["aadhaar","aadhar","pan card","permanent account number","income tax",
     "election commission","voter id","passport","driving licence","driving license",
     "identity card","uid","unique identification","govt of india","government of india",
@@ -127,53 +128,52 @@ def parse_booking(text):
 def is_payment_by_name(fn): return any(kw in fn.lower() for kw in PAYMENT_NAME_KW)
 
 def check_text_for_payment(text):
-    """Check if text contains payment keywords but NOT KYC keywords."""
     t = text.lower()
-    # If it has KYC keywords, it's a document, not payment
     for kw in KYC_KEYWORDS:
-        if kw in t: return False  # It's a KYC doc, keep it
-    # Check for payment keywords
+        if kw in t: return False
     for kw in PAYMENT_CONTENT_KW:
-        if kw in t: return True  # It's a payment doc, skip it
+        if kw in t: return True
     return False
 
 def is_payment_pdf(content):
-    """Read PDF text and check if it's a payment document."""
     if not PdfReader: return False
+    if len(content) > MAX_PDF_SCAN_SIZE:
+        print(f"=== PDF too large ({len(content)}b), skip scan ===", file=sys.stderr)
+        return False  # Too big to scan safely, assume it's a legit document
     try:
         reader = PdfReader(io.BytesIO(content))
         text = ""
-        for page in reader.pages[:3]:
-            t = page.extract_text()
-            if t: text += t + " "
+        for page in reader.pages[:2]:  # Only first 2 pages
+            try:
+                t = page.extract_text()
+                if t: text += t + " "
+            except: pass
         if not text.strip(): return False
         result = check_text_for_payment(text)
-        if result: print(f"=== PAYMENT PDF detected by content ===", file=sys.stderr)
+        if result: print(f"=== PAYMENT PDF detected ===", file=sys.stderr)
         return result
     except Exception as e:
-        print(f"=== PDF read err: {e} ===", file=sys.stderr)
+        print(f"=== PDF err: {e} ===", file=sys.stderr)
     return False
 
 def is_payment_image_ocr(content):
-    """OCR scan image and check if it's a payment screenshot."""
     if not HAS_OCR: return False
+    if len(content) > MAX_IMG_SCAN_SIZE:
+        print(f"=== IMG too large ({len(content)}b), skip OCR ===", file=sys.stderr)
+        return False
     try:
         img = Image.open(io.BytesIO(content))
-        # Resize large images for faster OCR
-        if img.width > 1500 or img.height > 1500:
-            img.thumbnail((1500, 1500))
-        text = pytesseract.image_to_string(img, lang='eng+hin', timeout=10)
+        img.thumbnail((800, 800))  # Smaller resize for memory safety
+        text = pytesseract.image_to_string(img, lang='eng', timeout=8)
         if not text.strip(): return False
         result = check_text_for_payment(text)
-        if result: print(f"=== PAYMENT IMAGE detected by OCR ===", file=sys.stderr)
-        else: print(f"=== OCR: not payment (KYC or other doc) ===", file=sys.stderr)
+        if result: print(f"=== PAYMENT IMG (OCR) ===", file=sys.stderr)
         return result
     except Exception as e:
         print(f"=== OCR err: {e} ===", file=sys.stderr)
     return False
 
 def extract_attachments(data):
-    """Extract ALL attachments from webhook payload."""
     atts=[]
     try:
         segs=data.get("payload",{}).get("data",{}).get("comment",[])
@@ -202,7 +202,6 @@ def extract_attachments(data):
     return atts
 
 def download_and_filter(atts):
-    """Download attachments. Read content of PDFs and OCR images to filter payments."""
     result=[]
     for a in atts:
         try:
@@ -211,18 +210,14 @@ def download_and_filter(atts):
                 print(f"=== DL FAIL: {a['name']} {r.status_code} ===",file=sys.stderr); continue
             content=r.content
             ct=r.headers.get("Content-Type",a["mime"])
-            
-            # Check PDFs by reading text
+            # Check PDFs (only small ones)
             if "pdf" in ct.lower() or a["name"].lower().endswith(".pdf"):
                 if is_payment_pdf(content):
-                    print(f"=== SKIP PDF (content): {a['name']} ===",file=sys.stderr)
-                    continue
-            # Check images by OCR
+                    print(f"=== SKIP PDF (content): {a['name']} ===",file=sys.stderr); continue
+            # Check images by OCR (only small ones)
             elif a["type"]=="image" or "image" in ct.lower():
                 if is_payment_image_ocr(content):
-                    print(f"=== SKIP IMG (OCR): {a['name']} ===",file=sys.stderr)
-                    continue
-            
+                    print(f"=== SKIP IMG (OCR): {a['name']} ===",file=sys.stderr); continue
             result.append({"name":a["name"],"content":content,"ct":ct})
             print(f"=== OK: {a['name']} ({len(content)}b) ===",file=sys.stderr)
         except Exception as e:
@@ -258,7 +253,7 @@ def create_conv(cid,subj):
     return r.json().get("id") if r.status_code in (200,201) else None
 
 @app.route("/health")
-def health(): return jsonify({"v":"8.0","ok":True,"pdf":"yes" if PdfReader else "no","ocr":"yes" if HAS_OCR else "no"})
+def health(): return jsonify({"v":"8.1","ok":True,"pdf":"yes" if PdfReader else "no","ocr":"yes" if HAS_OCR else "no"})
 
 @app.route("/clickup-webhook",methods=["POST"])
 def clickup_webhook():
