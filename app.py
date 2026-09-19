@@ -29,7 +29,34 @@ PAYMENT_CONTENT_KW = ["payment successful","transaction id","transaction ref","u
 KYC_KEYWORDS = ["aadhaar","aadhar","pan card","permanent account number","income tax","election commission","voter id","passport","driving licence","driving license","identity card","uid","unique identification","govt of india","government of india","ministry of","certificate of incorporation","memorandum","articles of association","gst certificate","gstin","registration certificate","company pan"]
 SCREENSHOT_PDF_PATTERNS = [r'^image\s*\(\d+\)\.pdf$', r'^image\s*\d+\.pdf$', r'^screenshot', r'^img_', r'^photo_']
 
-VOS_MAPPING = {"IndiraNagar - Aspire Coworks":{"email":"aspirecoworkings@gmail.com","address":"17, 7th Main Rd, Indira Nagar II Stage, Hoysala Nagar, Indiranagar, Bengaluru, Karnataka 560038, India"},"Koramangala - Aspire Coworks":{"email":"aspirecoworkings@gmail.com","address":"2nd & 3rd Floor, Balaji Arcade, 472/7, 20th L Cross Rd, 4th Block, Koramangala, Bengaluru, Karnataka 560095, India"},"EcoSpace - Hebbal, HMT Layout":{"email":"ecospaceblr@gmail.com","address":"No,33, 4th Floor, 1st Main, CBI Main Rd, HMT Layout, Ganganagar, Bengaluru, Karnataka 560032, India"},"Laksh Space - Hebbal, HMT layout":{"email":"Lakshspaceblr@gmail.com","address":"No,33, 1st Floor, 1st Main, CBI Main Rd, HMT Layout, Ganganagar, Bengaluru, Karnataka 560032, India"},"RegisterKaro - Old Airport Road":{"email":"rupeshrai@registerkaro.com","address":"Unit 101, Oxford Towers, No. 139 Old Airport Road, Bengaluru-560008"},"Getset Spaces - Green Park":{"email":"booking.del@getsetoffice.in","address":"Commercial Complex, 400A, 4th Floor, 12 Ajit Singh House, Yusuf Sarai, Green Park, New Delhi, Delhi 110016"},"CP Alt F":{"email":None,"address":"J6JF+53C, Connaught Lane, Barakhamba, New Delhi, Delhi 110001, India"},"Mytime Cowork - Saket":{"email":"Sales@mytimeco.work","address":"55 Lane-2, Westend Marg, Saiyad Ul Ajaib Village, Saket, New Delhi, Delhi 110030, India"},"Okhla Alt F":{"email":None,"address":"101, NH-19, CRRI, Ishwar Nagar, Okhla, New Delhi, Delhi 110044, India"},"WBB Office":{"email":"Info@wbboffice.com","address":"Room no 1 No. 19, Metro Station, 35, Anna Salai, near Little Mount, Little Mount, Nandanam, Chennai, Tamil Nadu 600015, India"},"MSB Cospazes":{"email":"msbcospazesofficials@gmail.com","address":"No.26-27-A, H- Block, Third Floor, (Office No.401 & 404) Vikas Marg, Laxmi Nagar, Delhi-110092"},"RegisterKaro - Okhla":{"email":"rupeshrai@registerkaro.com","address":"808B, DLF Prime Tower, Pocket F, Okhla Phase I, Okhla Industrial Estate, New Delhi, Delhi 110020"},"Getset Spaces - Gurgaon":{"email":"booking.ggn@getsetoffice.in","address":"Unit No. 309, 3rd Floor, Tower-A of Eleven Bay (Former SAS Tower), Support Area, Medicity, Sector-38, Gurgaon 122001"},"Infrapro - Sector 44":{"email":"nitish@infraprospaces.com","address":"Plot no 4, 2nd floor, Minarch Tower, Sector 44, Gurugram, Haryana 122003, India"},"TEAM COWORK - Palm Court":{"email":"virtualoffice@teamco.work","address":"Mehrauli Rd, Gurugram, Haryana 122022, India"},"The Work Lounge - Sector 66":{"email":"theworkloungen@gmail.com","address":"02-007, 2nd Floor, Emar The Palm Square, Sector 66, Golf Course Road, Extension, Gurugram, Haryana, 122102"},"MSB COspaze - Bhondsi":{"email":"msbcospazesofficials@gmail.com","address":"2nd Floor, Sona Marble Building, Sneh Vihar, Bhondsi, Gurgaon - 122102"},"Click Office - Sector 2":{"email":"Hr@clickoffice.in","address":"B-128, B Block, Sector 2, Noida, Uttar Pradesh 201301"},"Crystaa - Sector 63":{"email":"crystatower@gmail.com","address":"63m, Ivent, C-030, C Block, Sector 63, Noida, Hazratpur Wajidpur, Uttar Pradesh 201309, India"},"Workshala - Sector 3":{"email":"mohitbhargav28@gmail.com","address":"D-9, Vyapar Marg, Block D, Noida Sector 3, Noida, Uttar Pradesh 201301, India"},"RegisterKaro - Sector 90":{"email":"rupeshrai@registerkaro.com","address":"603 604, FLOOR 6th, TOWER B BHUTANI ALPHATHUM, SECTOR 90, NOIDA, 201305."},"Alt F - Sector 62":{"email":None,"address":"C-20, 1/1A, Coast Guard Golf Ground Rd, C Block, Phase 2, Industrial Area, Sector 62, Noida, Uttar Pradesh 201309"},"Alt F - Sector 142":{"email":None,"address":"Ground Floor, Plot No. 21 & 21A, Sector 142, Noida, Uttar Pradesh 201304"},"Alt F - Sector 58":{"email":None,"address":"A100, A Block, Sector 58, Noida, Uttar Pradesh 201309"},"Alt F - Sector 68":{"email":None,"address":"A-5, Grovy Optiva, Block A, Sector 68, Noida, Basi Bahuddin Nagar, Uttar Pradesh 201316"},"Naitik Get Set Office":{"email":"naitikkr32@gmail.com","address":"648/4 DEVLI VILLAGE BANGALORE - 110062 1 FLOOR"}}
+VOS_MAPPING = {
+    "IndiraNagar - Aspire Coworks":{"email":"aspirecoworkings@gmail.com","alternate_email":"booking_in@aspirecoworks.in","address":"17, 7th Main Rd, Indira Nagar II Stage, Hoysala Nagar, Indiranagar, Bengaluru, Karnataka 560038, India"},
+    "Koramangala - Aspire Coworks":{"email":"aspirecoworkings@gmail.com","alternate_email":"booking_kmg@aspirecoworks.in","address":"2nd & 3rd Floor, Balaji Arcade, 472/7, 20th L Cross Rd, 4th Block, Koramangala, Bengaluru, Karnataka 560095, India"},
+    "EcoSpace - Hebbal, HMT Layout":{"email":"ecospaceblr@gmail.com","address":"No,33, 4th Floor, 1st Main, CBI Main Rd, HMT Layout, Ganganagar, Bengaluru, Karnataka 560032, India"},
+    "Laksh Space - Hebbal, HMT layout":{"email":"Lakshspaceblr@gmail.com","address":"No,33, 1st Floor, 1st Main, CBI Main Rd, HMT Layout, Ganganagar, Bengaluru, Karnataka 560032, India"},
+    "RegisterKaro - Old Airport Road":{"email":"rupeshrai@registerkaro.com","alternate_email":"dipanshusaini@registerkaro.com","address":"Unit 101, Oxford Towers, No. 139 Old Airport Road, Bengaluru-560008"},
+    "Getset Spaces - Green Park":{"email":"booking.del@getsetoffice.in","alternate_email":"ekta.mulani@getsetoffice.in","address":"Commercial Complex, 400A, 4th Floor, 12 Ajit Singh House, Yusuf Sarai, Green Park, New Delhi, Delhi 110016"},
+    "CP Alt F":{"email":null,"address":"J6JF+53C, Connaught Lane, Barakhamba, New Delhi, Delhi 110001, India"},
+    "Mytime Cowork - Saket":{"email":"Sales@mytimeco.work","address":"55 Lane-2, Westend Marg, Saiyad Ul Ajaib Village, Saket, New Delhi, Delhi 110030, India"},
+    "Okhla Alt F":{"email":null,"address":"101, NH-19, CRRI, Ishwar Nagar, Okhla, New Delhi, Delhi 110044, India"},
+    "WBB Office":{"email":"Info@wbboffice.com","address":"Room no 1 No. 19, Metro Station, 35, Anna Salai, near Little Mount, Little Mount, Nandanam, Chennai, Tamil Nadu 600015, India"},
+    "MSB Cospazes":{"email":"msbcospazesofficials@gmail.com","address":"No.26-27-A, H- Block, Third Floor, (Office No.401 & 404) Vikas Marg, Laxmi Nagar, Delhi-110092"},
+    "RegisterKaro - Okhla":{"email":"rupeshrai@registerkaro.com","alternate_email":"dipanshusaini@registerkaro.com","address":"808B, DLF Prime Tower, Pocket F, Okhla Phase I, Okhla Industrial Estate, New Delhi, Delhi 110020"},
+    "Getset Spaces - Gurgaon":{"email":"booking.ggn@getsetoffice.in","address":"Unit No. 309, 3rd Floor, Tower-A of Eleven Bay (Former SAS Tower), Support Area, Medicity, Sector-38, Gurgaon 122001"},
+    "Infrapro - Sector 44":{"email":"nitish@infraprospaces.com","address":"Plot no 4, 2nd floor, Minarch Tower, Sector 44, Gurugram, Haryana 122003, India"},
+    "TEAM COWORK - Palm Court":{"email":"virtualoffice@teamco.work","address":"Mehrauli Rd, Gurugram, Haryana 122022, India"},
+    "The Work Lounge - Sector 66":{"email":"theworkloungen@gmail.com","address":"02-007, 2nd Floor, Emar The Palm Square, Sector 66, Golf Course Road, Extension, Gurugram, Haryana, 122102"},
+    "MSB COspaze - Bhondsi":{"email":"msbcospazesofficials@gmail.com","address":"2nd Floor, Sona Marble Building, Sneh Vihar, Bhondsi, Gurgaon - 122102"},
+    "Click Office - Sector 2":{"email":"Hr@clickoffice.in","address":"B-128, B Block, Sector 2, Noida, Uttar Pradesh 201301"},
+    "Crystaa - Sector 63":{"email":"crystatower@gmail.com","address":"63m, Ivent, C-030, C Block, Sector 63, Noida, Hazratpur Wajidpur, Uttar Pradesh 201309, India"},
+    "Workshala - Sector 3":{"email":"mohitbhargav28@gmail.com","address":"D-9, Vyapar Marg, Block D, Noida Sector 3, Noida, Uttar Pradesh 201301, India"},
+    "RegisterKaro - Sector 90":{"email":"rupeshrai@registerkaro.com","alternate_email":"dipanshusaini@registerkaro.com","address":"603 604, FLOOR 6th, TOWER B BHUTANI ALPHATHUM, SECTOR 90, NOIDA, 201305."},
+    "Alt F - Sector 62":{"email":null,"address":"C-20, 1/1A, Coast Guard Golf Ground Rd, C Block, Phase 2, Industrial Area, Sector 62, Noida, Uttar Pradesh 201309"},
+    "Alt F - Sector 142":{"email":null,"address":"Ground Floor, Plot No. 21 & 21A, Sector 142, Noida, Uttar Pradesh 201304"},
+    "Alt F - Sector 58":{"email":null,"address":"A100, A Block, Sector 58, Noida, Uttar Pradesh 201309"},
+    "Alt F - Sector 68":{"email":null,"address":"A-5, Grovy Optiva, Block A, Sector 68, Noida, Basi Bahuddin Nagar, Uttar Pradesh 201316"},
+    "Naitik Get Set Office":{"email":"naitikkr32@gmail.com","address":"648/4 DEVLI VILLAGE BANGALORE - 110062 1 FLOOR"},
+}
 
 def match_space_partner(sp_text,loc_text):
     sp=sp_text.lower().strip();loc=loc_text.lower().strip();b=sp+" "+loc
@@ -198,12 +225,15 @@ def find_or_create_contact(email,name=None):
     r=requests.post(f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts",headers=HEADERS,json=p)
     return r.json().get("payload",{}).get("contact",{}).get("id") if r.status_code in (200,201) else None
 
-def create_conv(cid,subj):
-    r=requests.post(f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations",headers=HEADERS,json={"inbox_id":CHATWOOT_INBOX_ID,"contact_id":cid,"status":"open","additional_attributes":{"mail_subject":subj}})
+def create_conv(cid,subj,cc_emails=None):
+    aa={"mail_subject":subj}
+    if cc_emails:
+        aa["cc_emails"]=cc_emails
+    r=requests.post(f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations",headers=HEADERS,json={"inbox_id":CHATWOOT_INBOX_ID,"contact_id":cid,"status":"open","additional_attributes":aa})
     return r.json().get("id") if r.status_code in (200,201) else None
 
 @app.route("/health")
-def health(): return jsonify({"v":"9.3","ok":True,"dedup_entries":len(SENT_EMAILS)})
+def health(): return jsonify({"v":"9.4","ok":True,"dedup_entries":len(SENT_EMAILS)})
 
 @app.route("/clickup-webhook",methods=["POST"])
 def clickup_webhook():
@@ -226,21 +256,25 @@ def clickup_webhook():
     if is_duplicate(co, vos["email"]):
         return jsonify({"skip":True,"reason":"DUPLICATE - already sent for this booking"}),200
 
+    # CC: use alternate email if available for this Space Partner
+    cc_email = vos.get("alternate_email")
+    cc_list = [cc_email] if cc_email else None
+
     lines=["Dear Space Partner,","","Greetings, we have a Virtual Office booking for your Space.","",f"Company Name - {co}",f"Space Partner - {vk}",f"Authorized Signatory - {bk.get('signatory','')}",f"Location - {vos['address']}",f"Email - {bk.get('email','')}",f"Contact - {bk.get('phone','')}",f"Plan - {bk.get('plan','')}",]
     if bk.get("firm_type"): lines.append(f"Entity Type - {bk['firm_type']}")
     if bk.get("nature_of_business"): lines.append(f"Business Description & Nature of Business - {bk['nature_of_business']}")
     lines+=["\nPFA, the required documents, kindly share the Draft Agreement to proceed further.","\nThanks and Regards,","Naitik","Operation Associate","8368041681"]
     body="\n".join(lines); subj=f"Virtual Office Plan - {co}"
     atts=extract_attachments(data); dls=download_and_filter(atts)
-    print(f"=== SEND {vos['email']}: {len(dls)}/{len(atts)} ===",file=sys.stderr)
+    print(f"=== SEND {vos['email']} CC={cc_email or 'none'}: {len(dls)}/{len(atts)} ===",file=sys.stderr)
     cid=find_or_create_contact(vos["email"],vk)
     if not cid: return jsonify({"error":"contact"}),500
-    conv=create_conv(cid,subj)
+    conv=create_conv(cid,subj,cc_list)
     if not conv: return jsonify({"error":"conv"}),500
     res=send_chatwoot(conv,body,dls)
     if "error" in res: return jsonify(res),500
     # Mark as sent to prevent duplicates
     mark_sent(co, vos["email"])
-    return jsonify({"ok":True,"to":vos["email"],"sent":len(dls),"found":len(atts)})
+    return jsonify({"ok":True,"to":vos["email"],"cc":cc_email,"sent":len(dls),"found":len(atts)})
 
 if __name__=="__main__": app.run(host="0.0.0.0",port=int(os.environ.get("PORT",10000)))
