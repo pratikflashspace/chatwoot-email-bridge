@@ -20,9 +20,8 @@ CLICKUP_TEAM_ID = os.environ.get("CLICKUP_TEAM_ID", "1851686")
 HEADERS = {"api_access_token": CHATWOOT_TOKEN, "Content-Type": "application/json"}
 MAX_PDF_SCAN = 3*1024*1024
 
-# In-memory dedup: track sent emails in last 24h (survives until service restart)
-SENT_EMAILS = {}  # key: "company_name|space_partner_email" -> timestamp
-DEDUP_WINDOW = 86400  # 24 hours in seconds
+SENT_EMAILS = {}
+DEDUP_WINDOW = 86400
 
 PAYMENT_NAME_KW = ["payment","amount","token amount","paid","transaction","receipt","invoice","bank statement","account statement","upi","neft","imps","flash space token"]
 PAYMENT_CONTENT_KW = ["payment successful","transaction id","transaction ref","utr no","utr:","upi ref","upi id","paid to","paid via","amount paid","total paid","razorpay","phonepe","google pay","paytm","bhim","bank transfer","neft ref","imps ref","credited","debited","account statement","bank statement","payment receipt","invoice amount","amount received","payment confirmation","order id","payment id","money transfer","fund transfer","transaction successful","txn id","amount debited","amount credited","net banking","total amount"]
@@ -36,9 +35,9 @@ VOS_MAPPING = {
     "Laksh Space - Hebbal, HMT layout":{"email":"Lakshspaceblr@gmail.com","address":"No,33, 1st Floor, 1st Main, CBI Main Rd, HMT Layout, Ganganagar, Bengaluru, Karnataka 560032, India"},
     "RegisterKaro - Old Airport Road":{"email":"rupeshrai@registerkaro.com","alternate_email":"dipanshusaini@registerkaro.com","address":"Unit 101, Oxford Towers, No. 139 Old Airport Road, Bengaluru-560008"},
     "Getset Spaces - Green Park":{"email":"booking.del@getsetoffice.in","alternate_email":"ekta.mulani@getsetoffice.in","address":"Commercial Complex, 400A, 4th Floor, 12 Ajit Singh House, Yusuf Sarai, Green Park, New Delhi, Delhi 110016"},
-    "CP Alt F":{"email":null,"address":"J6JF+53C, Connaught Lane, Barakhamba, New Delhi, Delhi 110001, India"},
+    "CP Alt F":{"email":"__NONE__","address":"J6JF+53C, Connaught Lane, Barakhamba, New Delhi, Delhi 110001, India"},
     "Mytime Cowork - Saket":{"email":"Sales@mytimeco.work","address":"55 Lane-2, Westend Marg, Saiyad Ul Ajaib Village, Saket, New Delhi, Delhi 110030, India"},
-    "Okhla Alt F":{"email":null,"address":"101, NH-19, CRRI, Ishwar Nagar, Okhla, New Delhi, Delhi 110044, India"},
+    "Okhla Alt F":{"email":"__NONE__","address":"101, NH-19, CRRI, Ishwar Nagar, Okhla, New Delhi, Delhi 110044, India"},
     "WBB Office":{"email":"Info@wbboffice.com","address":"Room no 1 No. 19, Metro Station, 35, Anna Salai, near Little Mount, Little Mount, Nandanam, Chennai, Tamil Nadu 600015, India"},
     "MSB Cospazes":{"email":"msbcospazesofficials@gmail.com","address":"No.26-27-A, H- Block, Third Floor, (Office No.401 & 404) Vikas Marg, Laxmi Nagar, Delhi-110092"},
     "RegisterKaro - Okhla":{"email":"rupeshrai@registerkaro.com","alternate_email":"dipanshusaini@registerkaro.com","address":"808B, DLF Prime Tower, Pocket F, Okhla Phase I, Okhla Industrial Estate, New Delhi, Delhi 110020"},
@@ -51,13 +50,18 @@ VOS_MAPPING = {
     "Crystaa - Sector 63":{"email":"crystatower@gmail.com","address":"63m, Ivent, C-030, C Block, Sector 63, Noida, Hazratpur Wajidpur, Uttar Pradesh 201309, India"},
     "Workshala - Sector 3":{"email":"mohitbhargav28@gmail.com","address":"D-9, Vyapar Marg, Block D, Noida Sector 3, Noida, Uttar Pradesh 201301, India"},
     "RegisterKaro - Sector 90":{"email":"rupeshrai@registerkaro.com","alternate_email":"dipanshusaini@registerkaro.com","address":"603 604, FLOOR 6th, TOWER B BHUTANI ALPHATHUM, SECTOR 90, NOIDA, 201305."},
-    "Alt F - Sector 62":{"email":null,"address":"C-20, 1/1A, Coast Guard Golf Ground Rd, C Block, Phase 2, Industrial Area, Sector 62, Noida, Uttar Pradesh 201309"},
-    "Alt F - Sector 142":{"email":null,"address":"Ground Floor, Plot No. 21 & 21A, Sector 142, Noida, Uttar Pradesh 201304"},
-    "Alt F - Sector 58":{"email":null,"address":"A100, A Block, Sector 58, Noida, Uttar Pradesh 201309"},
-    "Alt F - Sector 68":{"email":null,"address":"A-5, Grovy Optiva, Block A, Sector 68, Noida, Basi Bahuddin Nagar, Uttar Pradesh 201316"},
+    "Alt F - Sector 62":{"email":"__NONE__","address":"C-20, 1/1A, Coast Guard Golf Ground Rd, C Block, Phase 2, Industrial Area, Sector 62, Noida, Uttar Pradesh 201309"},
+    "Alt F - Sector 142":{"email":"__NONE__","address":"Ground Floor, Plot No. 21 & 21A, Sector 142, Noida, Uttar Pradesh 201304"},
+    "Alt F - Sector 58":{"email":"__NONE__","address":"A100, A Block, Sector 58, Noida, Uttar Pradesh 201309"},
+    "Alt F - Sector 68":{"email":"__NONE__","address":"A-5, Grovy Optiva, Block A, Sector 68, Noida, Basi Bahuddin Nagar, Uttar Pradesh 201316"},
     "Mankit Instaspaces":{"email":"naitikkr32@gmail.com","alternate_email":"mankitkr980@gmail.com","address":"Noida, 1 Floor Sector 32 Uttar Pradesh - 110062"},
     "Naitik Get Set Office":{"email":"naitikkr32@gmail.com","address":"648/4 DEVLI VILLAGE BANGALORE - 110062 1 FLOOR"},
 }
+
+# Replace __NONE__ sentinel with actual None at import time
+for _k in VOS_MAPPING:
+    if VOS_MAPPING[_k].get("email") == "__NONE__":
+        VOS_MAPPING[_k]["email"] = None
 
 def match_space_partner(sp_text,loc_text):
     sp=sp_text.lower().strip();loc=loc_text.lower().strip();b=sp+" "+loc
@@ -159,10 +163,8 @@ def is_payment_image(content, img_meta=None):
     return score>=2
 
 def is_duplicate(company, sp_email):
-    """Check if we already sent an email for this company to this Space Partner."""
     key = f"{company.lower().strip()}|{sp_email.lower().strip()}"
     now = time.time()
-    # Clean old entries
     expired = [k for k,v in SENT_EMAILS.items() if now-v > DEDUP_WINDOW]
     for k in expired: del SENT_EMAILS[k]
     if key in SENT_EMAILS:
@@ -235,7 +237,7 @@ def create_conv(cid,subj,cc_emails=None):
     return r.json().get("id") if r.status_code in (200,201) else None
 
 @app.route("/health")
-def health(): return jsonify({"v":"9.5","ok":True,"dedup_entries":len(SENT_EMAILS)})
+def health(): return jsonify({"v":"9.5.1","ok":True,"dedup_entries":len(SENT_EMAILS)})
 
 @app.route("/clickup-webhook",methods=["POST"])
 def clickup_webhook():
@@ -254,11 +256,9 @@ def clickup_webhook():
     vos=VOS_MAPPING.get(vk)
     if not vos or not vos.get("email"): return jsonify({"skip":True}),200
 
-    # DUPLICATE CHECK: only 1 email per company per Space Partner
     if is_duplicate(co, vos["email"]):
         return jsonify({"skip":True,"reason":"DUPLICATE - already sent for this booking"}),200
 
-    # CC: use alternate email if available for this Space Partner
     cc_email = vos.get("alternate_email")
     cc_list = [cc_email] if cc_email else None
 
@@ -275,7 +275,6 @@ def clickup_webhook():
     if not conv: return jsonify({"error":"conv"}),500
     res=send_chatwoot(conv,body,dls)
     if "error" in res: return jsonify(res),500
-    # Mark as sent to prevent duplicates
     mark_sent(co, vos["email"])
     return jsonify({"ok":True,"to":vos["email"],"cc":cc_email,"sent":len(dls),"found":len(atts)})
 
