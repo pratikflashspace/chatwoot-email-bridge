@@ -55,6 +55,7 @@ VOS_MAPPING = {
     "Alt F - Sector 142":{"email":null,"address":"Ground Floor, Plot No. 21 & 21A, Sector 142, Noida, Uttar Pradesh 201304"},
     "Alt F - Sector 58":{"email":null,"address":"A100, A Block, Sector 58, Noida, Uttar Pradesh 201309"},
     "Alt F - Sector 68":{"email":null,"address":"A-5, Grovy Optiva, Block A, Sector 68, Noida, Basi Bahuddin Nagar, Uttar Pradesh 201316"},
+    "Mankit Instaspaces":{"email":"naitikkr32@gmail.com","alternate_email":"mankitkr980@gmail.com","address":"Noida, 1 Floor Sector 32 Uttar Pradesh - 110062"},
     "Naitik Get Set Office":{"email":"naitikkr32@gmail.com","address":"648/4 DEVLI VILLAGE BANGALORE - 110062 1 FLOOR"},
 }
 
@@ -71,6 +72,7 @@ def match_space_partner(sp_text,loc_text):
         if "delhi" in loc: return "Getset Spaces - Green Park",None
         if "gurgaon" in loc: return "Getset Spaces - Gurgaon",None
         return "Getset Spaces - Green Park",None
+    if "mankit" in sp or "instaspaces" in sp.replace(" ",""): return "Mankit Instaspaces",None
     if "click" in sp and "office" in sp: return "Click Office - Sector 2",None
     if "crysta" in sp: return "Crystaa - Sector 63",None
     if "alt" in sp and "f" in sp:
@@ -233,7 +235,7 @@ def create_conv(cid,subj,cc_emails=None):
     return r.json().get("id") if r.status_code in (200,201) else None
 
 @app.route("/health")
-def health(): return jsonify({"v":"9.4","ok":True,"dedup_entries":len(SENT_EMAILS)})
+def health(): return jsonify({"v":"9.5","ok":True,"dedup_entries":len(SENT_EMAILS)})
 
 @app.route("/clickup-webhook",methods=["POST"])
 def clickup_webhook():
