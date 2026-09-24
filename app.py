@@ -8,6 +8,11 @@ try:
     HAS_PIL = True
 except:
     HAS_PIL = False
+try:
+    import pytesseract
+    HAS_OCR = True
+except:
+    HAS_OCR = False
 
 app = Flask(__name__)
 CHATWOOT_URL = os.environ.get("CHATWOOT_URL", "")
@@ -27,6 +32,10 @@ PAYMENT_NAME_KW = ["payment","amount","token amount","paid","transaction","recei
 PAYMENT_CONTENT_KW = ["payment successful","transaction id","transaction ref","utr no","utr:","upi ref","upi id","paid to","paid via","amount paid","total paid","razorpay","phonepe","google pay","paytm","bhim","bank transfer","neft ref","imps ref","credited","debited","account statement","bank statement","payment receipt","invoice amount","amount received","payment confirmation","order id","payment id","money transfer","fund transfer","transaction successful","txn id","amount debited","amount credited","net banking","total amount"]
 KYC_KEYWORDS = ["aadhaar","aadhar","pan card","permanent account number","income tax","election commission","voter id","passport","driving licence","driving license","identity card","uid","unique identification","govt of india","government of india","ministry of","certificate of incorporation","memorandum","articles of association","gst certificate","gstin","registration certificate","company pan"]
 SCREENSHOT_PDF_PATTERNS = [r'^image\s*\(\d+\)\.pdf$', r'^image\s*\d+\.pdf$', r'^screenshot', r'^img_', r'^photo_']
+
+# OCR keywords for payment detection in images
+PAYMENT_OCR_KW = ["payment successful","transaction id","transaction ref","utr","upi ref","upi id","paid to","paid via","amount paid","total paid","razorpay","phonepe","google pay","paytm","bhim","bank transfer","neft","imps","credited","debited","payment receipt","amount received","payment confirmation","money transfer","fund transfer","net banking","bank statement","account statement","inr ","rs.","rs ","cash received","deposit slip","bank deposit"]
+KYC_OCR_KW = ["aadhaar","aadhar","pan card","permanent account number","income tax","election commission","govt of india","government of india","ministry of","unique identification","certificate of incorporation","memorandum","articles of association","gst certificate","gstin","registration certificate"]
 
 _NONE = "__NONE__"
 VOS_MAPPING = {
@@ -143,7 +152,51 @@ def is_payment_pdf(content, name=""):
     except: pass
     return False
 
+def ocr_check_payment(img_pil, name=""):
+    """Use OCR to read text from image and check for payment keywords.
+    Returns: True (payment), False (KYC/safe), None (inconclusive/OCR failed)"""
+    if not HAS_OCR or not HAS_PIL: return None
+    try:
+        text = pytesseract.image_to_string(img_pil, lang='eng+hin', timeout=10)
+        if not text or len(text.strip()) < 10: return None
+        t = text.lower()
+        print(f"=== OCR TEXT ({name}): {t[:200]} ===", file=sys.stderr)
+        # Check KYC first - if KYC doc, definitely not payment
+        for kw in KYC_OCR_KW:
+            if kw in t:
+                print(f"=== OCR: KYC detected ({kw}) - SAFE ===", file=sys.stderr)
+                return False
+        # Check for rupee symbol
+        has_rupee = any(s in text for s in ['\u20b9', 'INR', 'Rs.', 'Rs '])
+        # Check payment keywords
+        pay_hits = [kw for kw in PAYMENT_OCR_KW if kw in t]
+        if pay_hits and len(pay_hits) >= 2:
+            print(f"=== OCR: PAYMENT detected ({pay_hits[:5]}) ===", file=sys.stderr)
+            return True
+        if has_rupee and pay_hits:
+            print(f"=== OCR: PAYMENT (rupee + {pay_hits[:3]}) ===", file=sys.stderr)
+            return True
+        return None  # inconclusive
+    except Exception as e:
+        print(f"=== OCR FAILED ({name}): {e} ===", file=sys.stderr)
+        return None
+
 def is_payment_image(content, img_meta=None):
+    name = img_meta.get('title', '?') if img_meta else '?'
+    # Step 1: Try OCR (most accurate)
+    if HAS_PIL and content:
+        try:
+            img = Image.open(io.BytesIO(content)).convert("RGB")
+            ocr_result = ocr_check_payment(img, name)
+            if ocr_result is True:
+                print(f"=== IMG VERDICT: PAYMENT (OCR) {name} ===", file=sys.stderr)
+                return True
+            if ocr_result is False:
+                print(f"=== IMG VERDICT: SAFE (OCR KYC) {name} ===", file=sys.stderr)
+                return False
+            # OCR inconclusive, fall through to color analysis
+        except: pass
+    # Step 2: Color analysis fallback
     score=0; w=int(img_meta.get("width",0)) if img_meta else 0; h=int(img_meta.get("height",0)) if img_meta else 0
     gp=0; blp=0
     if w>0 and h>0:
@@ -160,7 +213,7 @@ def is_payment_image(content, img_meta=None):
                 if gp>12: score+=1
                 if blp>15: score-=1
         except: pass
-    print(f"=== IMG ANALYSIS: score={score} w={w} h={h} green={gp:.1f}% blue={blp:.1f}% name={img_meta.get('title','?') if img_meta else '?'} ===",file=sys.stderr)
+    print(f"=== IMG ANALYSIS: score={score} w={w} h={h} green={gp:.1f}% blue={blp:.1f}% ocr={'unavail' if not HAS_OCR else 'inconclusive'} name={name} ===",file=sys.stderr)
     return score>=2
 
 def is_duplicate(company, sp_email):
@@ -244,7 +297,7 @@ def create_conv(cid,subj):
     return r.json().get("id") if r.status_code in (200,201) else None
 
 @app.route("/health")
-def health(): return jsonify({"v":"9.6","ok":True,"dedup_entries":len(SENT_EMAILS)})
+def health(): return jsonify({"v":"9.7","ok":True,"ocr":HAS_OCR,"pil":HAS_PIL,"dedup_entries":len(SENT_EMAILS)})
 
 @app.route("/clickup-webhook",methods=["POST"])
 def clickup_webhook():
