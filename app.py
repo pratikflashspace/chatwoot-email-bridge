@@ -1,4 +1,4 @@
-import os, sys, json, re, requests, io, time
+import os, sys, json, re, requests, io, time, gc
 from flask import Flask, request, jsonify
 try:
     from PyPDF2 import PdfReader
@@ -33,8 +33,7 @@ PAYMENT_CONTENT_KW = ["payment successful","transaction id","transaction ref","u
 KYC_KEYWORDS = ["aadhaar","aadhar","pan card","permanent account number","income tax","election commission","voter id","passport","driving licence","driving license","identity card","uid","unique identification","govt of india","government of india","ministry of","certificate of incorporation","memorandum","articles of association","gst certificate","gstin","registration certificate","company pan"]
 SCREENSHOT_PDF_PATTERNS = [r'^image\s*\(\d+\)\.pdf$', r'^image\s*\d+\.pdf$', r'^screenshot', r'^img_', r'^photo_']
 
-# OCR keywords for payment detection in images
-PAYMENT_OCR_KW = ["payment successful","transaction id","transaction ref","utr","upi ref","upi id","paid to","paid via","amount paid","total paid","razorpay","phonepe","google pay","paytm","bhim","bank transfer","neft","imps","credited","debited","payment receipt","amount received","payment confirmation","money transfer","fund transfer","net banking","bank statement","account statement","inr ","rs.","rs ","cash received","deposit slip","bank deposit"]
+PAYMENT_OCR_KW = ["payment successful","transaction id","transaction ref","utr","upi ref","upi id","paid to","paid via","amount paid","total paid","razorpay","phonepe","google pay","paytm","bhim","bank transfer","neft","imps","credited","debited","payment receipt","amount received","payment confirmation","money transfer","fund transfer","net banking","bank statement","account statement","cash received","deposit slip","bank deposit"]
 KYC_OCR_KW = ["aadhaar","aadhar","pan card","permanent account number","income tax","election commission","govt of india","government of india","ministry of","unique identification","certificate of incorporation","memorandum","articles of association","gst certificate","gstin","registration certificate"]
 
 _NONE = "__NONE__"
@@ -152,50 +151,44 @@ def is_payment_pdf(content, name=""):
     except: pass
     return False
 
-def ocr_check_payment(img_pil, name=""):
-    """Use OCR to read text from image and check for payment keywords.
-    Returns: True (payment), False (KYC/safe), None (inconclusive/OCR failed)"""
+def ocr_check_payment(content, name=""):
+    """OCR with tiny resized image to save RAM. Returns True/False/None."""
     if not HAS_OCR or not HAS_PIL: return None
     try:
-        text = pytesseract.image_to_string(img_pil, lang='eng+hin', timeout=10)
-        if not text or len(text.strip()) < 10: return None
+        img = Image.open(io.BytesIO(content)).convert("RGB")
+        img.thumbnail((400, 400))
+        text = pytesseract.image_to_string(img, lang='eng', timeout=5)
+        del img; gc.collect()
+        if not text or len(text.strip()) < 5: return None
         t = text.lower()
-        print(f"=== OCR TEXT ({name}): {t[:200]} ===", file=sys.stderr)
-        # Check KYC first - if KYC doc, definitely not payment
+        print(f"=== OCR ({name}): {t[:150].replace(chr(10),' ')} ===", file=sys.stderr)
         for kw in KYC_OCR_KW:
             if kw in t:
-                print(f"=== OCR: KYC detected ({kw}) - SAFE ===", file=sys.stderr)
+                print(f"=== OCR: KYC ({kw}) SAFE ===", file=sys.stderr)
                 return False
-        # Check for rupee symbol
         has_rupee = any(s in text for s in ['\u20b9', 'INR', 'Rs.', 'Rs '])
-        # Check payment keywords
         pay_hits = [kw for kw in PAYMENT_OCR_KW if kw in t]
-        if pay_hits and len(pay_hits) >= 2:
-            print(f"=== OCR: PAYMENT detected ({pay_hits[:5]}) ===", file=sys.stderr)
+        if len(pay_hits) >= 2:
+            print(f"=== OCR: PAYMENT ({pay_hits[:4]}) ===", file=sys.stderr)
             return True
         if has_rupee and pay_hits:
-            print(f"=== OCR: PAYMENT (rupee + {pay_hits[:3]}) ===", file=sys.stderr)
+            print(f"=== OCR: PAYMENT (rupee+{pay_hits[:3]}) ===", file=sys.stderr)
             return True
-        return None  # inconclusive
+        return None
     except Exception as e:
-        print(f"=== OCR FAILED ({name}): {e} ===", file=sys.stderr)
+        print(f"=== OCR FAIL ({name}): {e} ===", file=sys.stderr)
         return None
 
 def is_payment_image(content, img_meta=None):
     name = img_meta.get('title', '?') if img_meta else '?'
-    # Step 1: Try OCR (most accurate)
-    if HAS_PIL and content:
-        try:
-            img = Image.open(io.BytesIO(content)).convert("RGB")
-            ocr_result = ocr_check_payment(img, name)
-            if ocr_result is True:
-                print(f"=== IMG VERDICT: PAYMENT (OCR) {name} ===", file=sys.stderr)
-                return True
-            if ocr_result is False:
-                print(f"=== IMG VERDICT: SAFE (OCR KYC) {name} ===", file=sys.stderr)
-                return False
-            # OCR inconclusive, fall through to color analysis
-        except: pass
+    # Step 1: OCR (resized to 400px max, eng only, 5s timeout)
+    ocr_result = ocr_check_payment(content, name)
+    if ocr_result is True:
+        print(f"=== VERDICT: PAYMENT (OCR) {name} ===", file=sys.stderr)
+        return True
+    if ocr_result is False:
+        print(f"=== VERDICT: SAFE (OCR KYC) {name} ===", file=sys.stderr)
+        return False
     # Step 2: Color analysis fallback
     score=0; w=int(img_meta.get("width",0)) if img_meta else 0; h=int(img_meta.get("height",0)) if img_meta else 0
     gp=0; blp=0
@@ -212,8 +205,9 @@ def is_payment_image(content, img_meta=None):
                 if gp>5: score+=2
                 if gp>12: score+=1
                 if blp>15: score-=1
+            del img, px; gc.collect()
         except: pass
-    print(f"=== IMG ANALYSIS: score={score} w={w} h={h} green={gp:.1f}% blue={blp:.1f}% ocr={'unavail' if not HAS_OCR else 'inconclusive'} name={name} ===",file=sys.stderr)
+    print(f"=== IMG: score={score} {w}x{h} g={gp:.1f}% b={blp:.1f}% {name} ===",file=sys.stderr)
     return score>=2
 
 def is_duplicate(company, sp_email):
@@ -222,7 +216,7 @@ def is_duplicate(company, sp_email):
     expired = [k for k,v in SENT_EMAILS.items() if now-v > DEDUP_WINDOW]
     for k in expired: del SENT_EMAILS[k]
     if key in SENT_EMAILS:
-        print(f"=== DUPLICATE: {key} (sent {int(now-SENT_EMAILS[key])}s ago) ===",file=sys.stderr)
+        print(f"=== DUPLICATE: {key} ({int(now-SENT_EMAILS[key])}s ago) ===",file=sys.stderr)
         return True
     return False
 
@@ -274,7 +268,7 @@ def send_chatwoot(conv,content,files,cc_email=None):
         if cc_email:
             payload["cc_emails"]=cc_email
         r=requests.post(url,headers=HEADERS,json=payload)
-    print(f"=== CHATWOOT RESPONSE: {r.status_code} {r.text[:500]} ===",file=sys.stderr)
+    print(f"=== CHATWOOT: {r.status_code} ===",file=sys.stderr)
     return r.json() if r.status_code in (200,201) else {"error":r.text}
 
 def auth_check(req):
@@ -297,7 +291,7 @@ def create_conv(cid,subj):
     return r.json().get("id") if r.status_code in (200,201) else None
 
 @app.route("/health")
-def health(): return jsonify({"v":"9.7","ok":True,"ocr":HAS_OCR,"pil":HAS_PIL,"dedup_entries":len(SENT_EMAILS)})
+def health(): return jsonify({"v":"9.9","ok":True,"ocr":HAS_OCR,"pil":HAS_PIL,"dedup":len(SENT_EMAILS)})
 
 @app.route("/clickup-webhook",methods=["POST"])
 def clickup_webhook():
@@ -315,12 +309,9 @@ def clickup_webhook():
     if not vk: return jsonify({"skip":True,"r":skip}),200
     vos=VOS_MAPPING.get(vk)
     if not vos or not vos.get("email"): return jsonify({"skip":True}),200
-
     if is_duplicate(co, vos["email"]):
-        return jsonify({"skip":True,"reason":"DUPLICATE - already sent for this booking"}),200
-
+        return jsonify({"skip":True,"reason":"DUPLICATE"}),200
     cc_email = vos.get("alternate_email")
-
     lines=["Dear Space Partner,","","Greetings, we have a Virtual Office booking for your Space.","",f"Company Name - {co}",f"Space Partner - {vk}",f"Authorized Signatory - {bk.get('signatory','')}",f"Location - {vos['address']}",f"Email - {bk.get('email','')}",f"Contact - {bk.get('phone','')}",f"Plan - {bk.get('plan','')}",]
     if bk.get("firm_type"): lines.append(f"Entity Type - {bk['firm_type']}")
     if bk.get("nature_of_business"): lines.append(f"Business Description & Nature of Business - {bk['nature_of_business']}")
