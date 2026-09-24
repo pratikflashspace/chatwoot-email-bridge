@@ -106,7 +106,7 @@ def parse_booking(text):
             if m: return m.group(1).strip()
         return ""
     b["company_name"]=g([r'Company\s*Name\s*[:=\-]\s*\*?\*?\s*(.+?)(?:\n|$)'])
-    b["signatory"]=g([r'(?:Director|Authorised Signatory|Authorized Signatory)\s*[:=\-]\s*(.+?)(?:\n|$)'])
+    b["signatory"]=g([r'(?:Director|Authorised Signatory|Authorized Signatory|Proprietor)\s*/?\s*(?:Authorised Signatory)?\s*[:=\-]\s*(.+?)(?:\n|$)'])
     b["phone"]=g([r'Phone\s*[:=\-]\s*(.+?)(?:\n|$)'])
     b["email"]=g([r'Email\s*[:=\-]\s*\[?([^\]\s\n]+@[^\]\s\n]+)'])
     b["location"]=g([r'Location\s*/?\s*City\s*[:=\-]\s*(.+?)(?:\n|$)'])
@@ -145,20 +145,22 @@ def is_payment_pdf(content, name=""):
 
 def is_payment_image(content, img_meta=None):
     score=0; w=int(img_meta.get("width",0)) if img_meta else 0; h=int(img_meta.get("height",0)) if img_meta else 0
+    gp=0; blp=0
     if w>0 and h>0:
         ratio=h/w
         if ratio>1.7: score+=2
-        elif ratio<1.2: score-=3
+        elif ratio>1.3: score+=1
     if HAS_PIL and content:
         try:
             img=Image.open(io.BytesIO(content)).convert("RGB"); img.thumbnail((200,200)); px=list(img.getdata()); n=len(px)
             if n>0:
-                g=sum(1 for r,g,b in px if g>r*1.3 and g>b*1.3 and g>80)/n*100
-                bl=sum(1 for r,g,b in px if b>r*1.2 and b>g*1.1 and b>80)/n*100
-                if g>8: score+=2
-                if g>15: score+=1
-                if bl>10: score-=2
+                gp=sum(1 for r,g,b in px if g>r*1.3 and g>b*1.3 and g>80)/n*100
+                blp=sum(1 for r,g,b in px if b>r*1.2 and b>g*1.1 and b>80)/n*100
+                if gp>5: score+=2
+                if gp>12: score+=1
+                if blp>15: score-=1
         except: pass
+    print(f"=== IMG ANALYSIS: score={score} w={w} h={h} green={gp:.1f}% blue={blp:.1f}% name={img_meta.get('title','?') if img_meta else '?'} ===",file=sys.stderr)
     return score>=2
 
 def is_duplicate(company, sp_email):
@@ -242,7 +244,7 @@ def create_conv(cid,subj):
     return r.json().get("id") if r.status_code in (200,201) else None
 
 @app.route("/health")
-def health(): return jsonify({"v":"9.5.2","ok":True,"dedup_entries":len(SENT_EMAILS)})
+def health(): return jsonify({"v":"9.6","ok":True,"dedup_entries":len(SENT_EMAILS)})
 
 @app.route("/clickup-webhook",methods=["POST"])
 def clickup_webhook():
