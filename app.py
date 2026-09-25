@@ -160,7 +160,16 @@ def is_payment_pdf(content, name=""):
     except: pass
     return False
 
+# ===================================================================
+#  3-LEVEL IMAGE CLASSIFICATION PIPELINE
+#  Level 1: OCR text analysis
+#  Level 2: AI visual classification (multi-signal)
+#  Level 3: Rule engine (UNKNOWN = BLOCK)
+# ===================================================================
+
 def ocr_check_payment(content, name=""):
+    """Level 1: OCR text extraction and keyword matching.
+    Returns True (payment), False (KYC), or None (inconclusive)."""
     if not HAS_OCR or not HAS_PIL: return None
     for sz in [400, 200]:
         try:
@@ -170,85 +179,169 @@ def ocr_check_payment(content, name=""):
             del img; gc.collect()
             if not text or len(text.strip()) < 5:
                 if sz == 400:
-                    print(f"=== OCR ({name}): no text at {sz}px, retrying smaller ===", file=sys.stderr)
+                    print(f"=== L1-OCR ({name}): no text at {sz}px, retry smaller ===", file=sys.stderr)
                     continue
-                print(f"=== OCR ({name}): no text at {sz}px ===", file=sys.stderr)
                 return None
             t = text.lower()
-            print(f"=== OCR ({name} @{sz}px): {t[:150].replace(chr(10),' ')} ===", file=sys.stderr)
-            # Check KYC first
+            print(f"=== L1-OCR ({name} @{sz}px): {t[:150].replace(chr(10),' ')} ===", file=sys.stderr)
             for kw in KYC_OCR_KW:
                 if kw in t:
-                    print(f"=== OCR: KYC ({kw}) SAFE ===", file=sys.stderr)
+                    print(f"=== L1-OCR: KYC ({kw}) -> SAFE ===", file=sys.stderr)
                     return False
-            # Check rupee amounts > 100 (strong payment signal)
             amt_match = re.search(r'[\u20b9]\s*([\d,]+)', text) or re.search(r'(?:Rs\.?|INR)\s*([\d,]+)', text, re.IGNORECASE)
             if amt_match:
                 try:
                     amt = float(amt_match.group(1).replace(',', ''))
                     if amt > 100:
-                        print(f"=== OCR: AMOUNT Rs.{amt} PAYMENT ===", file=sys.stderr)
+                        print(f"=== L1-OCR: AMOUNT Rs.{amt} -> PAYMENT ===", file=sys.stderr)
                         return True
                 except: pass
-            # Check payment keywords
             has_rupee = any(s in text for s in ['\u20b9', 'INR', 'Rs.', 'Rs '])
             pay_hits = [kw for kw in PAYMENT_OCR_KW if kw in t]
             if len(pay_hits) >= 2:
-                print(f"=== OCR: PAYMENT ({pay_hits[:4]}) ===", file=sys.stderr)
+                print(f"=== L1-OCR: PAYMENT ({pay_hits[:4]}) ===", file=sys.stderr)
                 return True
             if has_rupee and pay_hits:
-                print(f"=== OCR: PAYMENT (rupee+{pay_hits[:3]}) ===", file=sys.stderr)
+                print(f"=== L1-OCR: PAYMENT (rupee+{pay_hits[:3]}) ===", file=sys.stderr)
                 return True
             return None
         except Exception as e:
-            err_str = str(e).lower()
-            if "timeout" in err_str and sz == 400:
-                print(f"=== OCR timeout at {sz}px, retrying {sz//2}px ===", file=sys.stderr)
+            if "timeout" in str(e).lower() and sz == 400:
+                print(f"=== L1-OCR: timeout at {sz}px, retry {sz//2}px ===", file=sys.stderr)
                 continue
-            print(f"=== OCR FAIL ({name}): {e} ===", file=sys.stderr)
+            print(f"=== L1-OCR FAIL ({name}): {e} ===", file=sys.stderr)
             return None
-    print(f"=== OCR FAIL ({name}): all sizes exhausted ===", file=sys.stderr)
+    print(f"=== L1-OCR: all sizes exhausted ({name}) ===", file=sys.stderr)
     return None
 
-def is_payment_image(content, img_meta=None):
-    name = img_meta.get('title', '?') if img_meta else '?'
-    # OCR check (with retry at smaller size)
+def analyze_visual_signals(content, meta, name="?"):
+    """Level 2: AI visual classification using multiple signals.
+    Returns dict of signals and dict of numeric details."""
+    signals = {
+        'phone_ratio': False,
+        'app_header_band': False,
+        'payment_colors': False,
+        'receipt_layout': False,
+        'document_like': False,
+    }
+    details = {}
+    w = int(meta.get("width", 0)) if meta else 0
+    h = int(meta.get("height", 0)) if meta else 0
+    if w > 0 and h > 0:
+        ratio = h / w
+        details['ratio'] = round(ratio, 2)
+        if 1.6 <= ratio <= 2.3 and min(w, h) >= 360:
+            signals['phone_ratio'] = True
+    if not HAS_PIL or not content:
+        return signals, details
+    try:
+        img = Image.open(io.BytesIO(content)).convert("RGB")
+        img.thumbnail((250, 250))
+        iw, ih = img.size
+        px = list(img.getdata())
+        n = len(px)
+        if n == 0:
+            del img; gc.collect()
+            return signals, details
+        green = 0; blue = 0; purple = 0; white = 0; neutral = 0
+        for r, g, b in px:
+            if g > r * 1.3 and g > b * 1.3 and g > 80: green += 1
+            if b > r * 1.2 and b > g * 1.1 and b > 80: blue += 1
+            if (r + b) > 160 and g < min(r, b) * 0.8: purple += 1
+            if r > 200 and g > 200 and b > 200: white += 1
+            if max(r, g, b) - min(r, g, b) < 30: neutral += 1
+        gp = green / n * 100; bp = blue / n * 100; pp = purple / n * 100
+        wp = white / n * 100; np_ = neutral / n * 100
+        details.update({'g': round(gp, 1), 'b': round(bp, 1), 'p': round(pp, 1),
+                        'w': round(wp, 1), 'n': round(np_, 1)})
+        # --- App header band: top 20% of image ---
+        top_rows = iw * max(1, ih // 5)
+        if top_rows <= n:
+            top_px = px[:top_rows]
+            tn = len(top_px)
+            if tn > 0:
+                tb = sum(1 for r, g, b in top_px if b > r * 1.2 and b > g * 1.1 and b > 80)
+                tg = sum(1 for r, g, b in top_px if g > r * 1.3 and g > b * 1.3 and g > 80)
+                tp = sum(1 for r, g, b in top_px if (r + b) > 160 and g < min(r, b) * 0.8)
+                tc = sum(1 for r, g, b in top_px if (max(r, g, b) - min(r, g, b)) > 40 and max(r, g, b) > 80)
+                tbp = tb / tn * 100; tgp = tg / tn * 100; tpp = tp / tn * 100; tcp = tc / tn * 100
+                details['hdr'] = f'b{tbp:.0f}g{tgp:.0f}p{tpp:.0f}c{tcp:.0f}'
+                if tbp > 35 or tgp > 30 or tpp > 25 or tcp > 50:
+                    signals['app_header_band'] = True
+        # --- Payment colors ---
+        if gp > 5 or bp > 8 or pp > 5:
+            signals['payment_colors'] = True
+        # --- Receipt layout (white + colored accents) ---
+        if wp > 45 and signals['payment_colors']:
+            signals['receipt_layout'] = True
+        # --- Document-like (neutral colors, no app UI) ---
+        if np_ > 55 and not signals['app_header_band'] and not signals['payment_colors']:
+            signals['document_like'] = True
+        elif wp > 60 and gp < 2 and bp < 3 and pp < 2:
+            signals['document_like'] = True
+        del img, px; gc.collect()
+    except Exception as e:
+        print(f"=== L2-VISUAL FAIL ({name}): {e} ===", file=sys.stderr)
+    return signals, details
+
+def classify_image(content, meta, name="?"):
+    """3-Level Classification Pipeline.
+    Returns (class, confidence, reason)
+    class: PAYMENT_PROOF | BUSINESS_DOCUMENT | UNKNOWN
+    UNKNOWN -> caller must BLOCK (conservative default)."""
+    print(f"=== CLASSIFY START: {name} ===", file=sys.stderr)
+
+    # === LEVEL 1: OCR ===
     ocr_result = ocr_check_payment(content, name)
     if ocr_result is True:
-        print(f"=== VERDICT: PAYMENT (OCR) {name} ===", file=sys.stderr)
-        return True
+        print(f"=== L1 -> PAYMENT_PROOF (high): {name} ===", file=sys.stderr)
+        return 'PAYMENT_PROOF', 'high', 'OCR detected payment text/amount'
     if ocr_result is False:
-        print(f"=== VERDICT: SAFE (OCR KYC) {name} ===", file=sys.stderr)
+        print(f"=== L1 -> BUSINESS_DOCUMENT (high): {name} ===", file=sys.stderr)
+        return 'BUSINESS_DOCUMENT', 'high', 'OCR detected KYC text'
+    print(f"=== L1 -> inconclusive, moving to L2 ===", file=sys.stderr)
+
+    # === LEVEL 2: Visual Signals ===
+    signals, details = analyze_visual_signals(content, meta, name)
+    sig_str = ' '.join(f'{k}={"Y" if v else "n"}' for k, v in signals.items())
+    det_str = ' '.join(f'{k}={v}' for k, v in details.items())
+    print(f"=== L2 SIGNALS: {sig_str} | {det_str} ===", file=sys.stderr)
+
+    # === LEVEL 3: Rule Engine (weighted scoring) ===
+    score = 0; reasons = []
+    if signals['app_header_band']:   score += 3; reasons.append('app_header(+3)')
+    if signals['payment_colors']:    score += 1; reasons.append('pay_colors(+1)')
+    if signals['phone_ratio']:       score += 1; reasons.append('phone_ratio(+1)')
+    if signals['receipt_layout']:    score += 1; reasons.append('receipt(+1)')
+    if signals['document_like']:     score -= 2; reasons.append('document(-2)')
+    score += 1; reasons.append('ocr_fail(+1)')
+
+    print(f"=== L3 SCORE={score} [{', '.join(reasons)}] ===", file=sys.stderr)
+
+    if score >= 3:
+        cls = 'PAYMENT_PROOF'; conf = 'medium'
+    elif score <= -1:
+        cls = 'BUSINESS_DOCUMENT'; conf = 'low'
+    else:
+        cls = 'UNKNOWN'; conf = 'low'
+
+    print(f"=== VERDICT: {cls} ({conf}) score={score} {name} ===", file=sys.stderr)
+    return cls, conf, f'score={score} [{", ".join(reasons)}]'
+
+def is_payment_image(content, img_meta=None):
+    """Entry point: uses 3-level pipeline.
+    PAYMENT_PROOF -> block.  BUSINESS_DOCUMENT -> allow.  UNKNOWN -> BLOCK."""
+    name = img_meta.get('title', '?') if img_meta else '?'
+    cls, conf, reason = classify_image(content, img_meta, name)
+    if cls == 'PAYMENT_PROOF':
+        return True
+    if cls == 'BUSINESS_DOCUMENT':
         return False
-    # OCR was inconclusive (timeout/error/no meaningful text)
-    ocr_failed = True
-    score=0; w=int(img_meta.get("width",0)) if img_meta else 0; h=int(img_meta.get("height",0)) if img_meta else 0
-    gp=0; bp=0; wp=0
-    if w>0 and h>0:
-        ratio=h/w
-        if ratio>1.7: score+=2
-        elif ratio>1.3: score+=1
-    if HAS_PIL and content:
-        try:
-            img=Image.open(io.BytesIO(content)).convert("RGB"); img.thumbnail((200,200)); px=list(img.getdata()); n=len(px)
-            if n>0:
-                gp=sum(1 for r,g,b in px if g>r*1.3 and g>b*1.3 and g>80)/n*100
-                bp=sum(1 for r,g,b in px if b>r*1.2 and b>g*1.1 and b>80)/n*100
-                wp=sum(1 for r,g,b in px if r>200 and g>200 and b>200)/n*100
-                # UPI green
-                if gp>5: score+=2
-                if gp>12: score+=1
-                # Blue app theme (HDFC/SBI/PayTM) on white background
-                if bp>8 and wp>30: score+=1
-                if bp>15 and wp>20: score+=1
-                # White-heavy with any app color accent = screenshot/receipt
-                if wp>50 and (gp>3 or bp>5): score+=1
-            del img, px; gc.collect()
-        except: pass
-    # OCR failure penalty: unknown text = mild suspicion
-    if ocr_failed: score+=1
-    print(f"=== IMG: score={score} {w}x{h} g={gp:.1f}% b={bp:.1f}% w={wp:.1f}% ocr=fail {name} ===",file=sys.stderr)
-    return score>=2
+    # UNKNOWN -> BLOCK (never let unclassified images through)
+    print(f"=== UNKNOWN -> BLOCK (conservative) {name}: {reason} ===", file=sys.stderr)
+    return True
+
+# ===================================================================
 
 def is_duplicate(company, sp_email):
     key = f"{company.lower().strip()}|{sp_email.lower().strip()}"
@@ -331,7 +424,7 @@ def create_conv(cid,subj):
     return r.json().get("id") if r.status_code in (200,201) else None
 
 @app.route("/health")
-def health(): return jsonify({"v":"10.1","ok":True,"ocr":HAS_OCR,"pil":HAS_PIL,"dedup":len(SENT_EMAILS)})
+def health(): return jsonify({"v":"10.2","ok":True,"ocr":HAS_OCR,"pil":HAS_PIL,"dedup":len(SENT_EMAILS)})
 
 @app.route("/clickup-webhook",methods=["POST"])
 def clickup_webhook():
