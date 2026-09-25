@@ -4,7 +4,7 @@ try:
     from PyPDF2 import PdfReader
 except: PdfReader = None
 try:
-    from PIL import Image
+    from PIL import Image, ImageFilter, ImageEnhance
     HAS_PIL = True
 except:
     HAS_PIL = False
@@ -65,7 +65,6 @@ KYC_PDF_NAME_KW = ["aadhaar","aadhar","pan","digilocker","certificate","incorpor
     "voter","passport","driving","licence","license","udyam","msme","fssai","trade",
     "shop","establishment","dipp","startup"]
 
-# Patterns to strip from email body fields (amounts, payment markers)
 AMOUNT_STRIP_PATTERNS = [
     r'(?:VO\s*/\s*)?(?:Contract|Registration|Token|Advance|Remaining)\s*(?:Amount|Payment)\s*[:=\-]?\s*[\d,\.]+\s*(?:\+\s*gst|\+\s*GST|\+\s*tax)?\s*',
     r'Payment\s*Date\s*[:=\-]?\s*[\d/\-\.]+\s*',
@@ -75,7 +74,6 @@ AMOUNT_STRIP_PATTERNS = [
 ]
 
 def sanitize_field(text):
-    """Remove any payment/amount info from a text field."""
     if not text: return text
     result = text
     for pat in AMOUNT_STRIP_PATTERNS:
@@ -173,30 +171,43 @@ def parse_booking(text):
     b["plan"]=g([r'Plan\s*/?\s*Package\s*[:=\-]\s*(.+?)(?:\n|$)'])
     b["nature_of_business"]=g([r'Nature\s*of\s*Business\s*[:=\-]\s*(.+?)(?:\n|$)'])
     for k in b: b[k]=re.sub(r'\*+','',b[k]).strip(); b[k]=re.sub(r'\[([^\]]+)\]\([^)]+\)',r'\1',b[k])
-    # Sanitize all fields to strip payment/amount info
-    for k in b:
-        b[k] = sanitize_field(b[k])
+    for k in b: b[k] = sanitize_field(b[k])
     return b
 
-def ocr_image_bytes(content, name="?", max_size=600):
+def ocr_image_bytes(content, name="?", max_size=800):
+    """OCR with enhanced preprocessing: grayscale, sharpen, contrast, multi-PSM."""
     if not HAS_OCR or not HAS_PIL: return ""
     for sz in [max_size, max_size // 2]:
         try:
-            img = Image.open(io.BytesIO(content)).convert("RGB")
+            img = Image.open(io.BytesIO(content))
+            img = img.convert("L")
             img.thumbnail((sz, sz))
-            text = pytesseract.image_to_string(img, lang='eng', timeout=8)
+            img = ImageEnhance.Contrast(img).enhance(1.5)
+            img = img.filter(ImageFilter.SHARPEN)
+            for psm in [6, 3]:
+                try:
+                    cfg = f'--psm {psm} --oem 3'
+                    text = pytesseract.image_to_string(img, lang='eng', timeout=10, config=cfg)
+                    if text and len(text.strip()) >= 3:
+                        print(f"=== OCR ({name} @{sz}px psm{psm}): {text[:120].replace(chr(10),' ')} ===", file=sys.stderr)
+                        del img; gc.collect()
+                        return text
+                except Exception as e:
+                    if "timeout" in str(e).lower():
+                        print(f"=== OCR timeout ({name}) psm{psm} @{sz}px ===", file=sys.stderr)
+                        continue
+                    raise
             del img; gc.collect()
-            if text and len(text.strip()) >= 3:
-                print(f"=== OCR ({name} @{sz}px): {text[:120].replace(chr(10),' ')} ===", file=sys.stderr)
-                return text
             if sz == max_size:
                 print(f"=== OCR ({name}): no text at {sz}px, retry {sz//2}px ===", file=sys.stderr)
                 continue
         except Exception as e:
             if "timeout" in str(e).lower() and sz == max_size:
                 print(f"=== OCR timeout ({name}) at {sz}px, retry {sz//2}px ===", file=sys.stderr)
+                gc.collect()
                 continue
             print(f"=== OCR error ({name}): {e} ===", file=sys.stderr)
+            gc.collect()
             return ""
     return ""
 
@@ -216,11 +227,11 @@ def extract_text_from_pdf(content, name="?"):
         return text
     if HAS_PDF2IMG:
         try:
-            images = convert_from_bytes(content, first_page=1, last_page=2, dpi=150, size=(800, None))
-            for i, img in enumerate(images):
+            images = convert_from_bytes(content, first_page=1, last_page=2, dpi=200, size=(1000, None))
+            for i, pimg in enumerate(images):
                 buf = io.BytesIO()
-                img.save(buf, format='JPEG', quality=80)
-                ocr_text = ocr_image_bytes(buf.getvalue(), f"{name}_p{i+1}", max_size=600)
+                pimg.save(buf, format='JPEG', quality=85)
+                ocr_text = ocr_image_bytes(buf.getvalue(), f"{name}_p{i+1}", max_size=800)
                 if ocr_text: text += ocr_text + " "
                 del buf; gc.collect()
             del images; gc.collect()
@@ -233,7 +244,7 @@ def extract_text_from_pdf(content, name="?"):
     return text
 
 def extract_text_from_image(content, name="?"):
-    return ocr_image_bytes(content, name, max_size=600)
+    return ocr_image_bytes(content, name, max_size=800)
 
 def is_payment_by_name(fn):
     return any(kw in fn.lower() for kw in PAYMENT_NAME_KW)
@@ -362,7 +373,7 @@ def create_conv(cid,subj):
     return r.json().get("id") if r.status_code in (200,201) else None
 
 @app.route("/health")
-def health(): return jsonify({"v":"11.1","ok":True,"ocr":HAS_OCR,"pil":HAS_PIL,"pdf2img":HAS_PDF2IMG,"dedup":len(SENT_EMAILS)})
+def health(): return jsonify({"v":"11.2","ok":True,"ocr":HAS_OCR,"pil":HAS_PIL,"pdf2img":HAS_PDF2IMG,"dedup":len(SENT_EMAILS)})
 
 @app.route("/clickup-webhook",methods=["POST"])
 def clickup_webhook():
