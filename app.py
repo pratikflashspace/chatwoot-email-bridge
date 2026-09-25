@@ -65,6 +65,27 @@ KYC_PDF_NAME_KW = ["aadhaar","aadhar","pan","digilocker","certificate","incorpor
     "voter","passport","driving","licence","license","udyam","msme","fssai","trade",
     "shop","establishment","dipp","startup"]
 
+# Patterns to strip from email body fields (amounts, payment markers)
+AMOUNT_STRIP_PATTERNS = [
+    r'(?:VO\s*/\s*)?(?:Contract|Registration|Token|Advance|Remaining)\s*(?:Amount|Payment)\s*[:=\-]?\s*[\d,\.]+\s*(?:\+\s*gst|\+\s*GST|\+\s*tax)?\s*',
+    r'Payment\s*Date\s*[:=\-]?\s*[\d/\-\.]+\s*',
+    r'[\u20b9]\s*[\d,]+\.?\d*\s*(?:\+\s*(?:gst|GST|tax))?\s*',
+    r'(?:Rs\.?|INR)\s*[\d,]+\.?\d*\s*(?:\+\s*(?:gst|GST|tax))?\s*',
+    r'\b\d{1,3}(?:,\d{3})*(?:\.\d+)?\s*\+\s*(?:gst|GST|tax)\b',
+]
+
+def sanitize_field(text):
+    """Remove any payment/amount info from a text field."""
+    if not text: return text
+    result = text
+    for pat in AMOUNT_STRIP_PATTERNS:
+        result = re.sub(pat, '', result, flags=re.IGNORECASE)
+    result = re.sub(r'[;,\-\s]+$', '', result).strip()
+    result = re.sub(r'^[;,\-\s]+', '', result).strip()
+    if result != text:
+        print(f"=== SANITIZED: '{text}' -> '{result}' ===", file=sys.stderr)
+    return result
+
 _NONE = "__NONE__"
 VOS_MAPPING = {
     "IndiraNagar - Aspire Coworks":{"email":"aspirecoworkings@gmail.com","alternate_email":"booking_in@aspirecoworks.in","address":"17, 7th Main Rd, Indira Nagar II Stage, Hoysala Nagar, Indiranagar, Bengaluru, Karnataka 560038, India"},
@@ -152,6 +173,9 @@ def parse_booking(text):
     b["plan"]=g([r'Plan\s*/?\s*Package\s*[:=\-]\s*(.+?)(?:\n|$)'])
     b["nature_of_business"]=g([r'Nature\s*of\s*Business\s*[:=\-]\s*(.+?)(?:\n|$)'])
     for k in b: b[k]=re.sub(r'\*+','',b[k]).strip(); b[k]=re.sub(r'\[([^\]]+)\]\([^)]+\)',r'\1',b[k])
+    # Sanitize all fields to strip payment/amount info
+    for k in b:
+        b[k] = sanitize_field(b[k])
     return b
 
 def ocr_image_bytes(content, name="?", max_size=600):
@@ -338,7 +362,7 @@ def create_conv(cid,subj):
     return r.json().get("id") if r.status_code in (200,201) else None
 
 @app.route("/health")
-def health(): return jsonify({"v":"11.0","ok":True,"ocr":HAS_OCR,"pil":HAS_PIL,"pdf2img":HAS_PDF2IMG,"dedup":len(SENT_EMAILS)})
+def health(): return jsonify({"v":"11.1","ok":True,"ocr":HAS_OCR,"pil":HAS_PIL,"pdf2img":HAS_PDF2IMG,"dedup":len(SENT_EMAILS)})
 
 @app.route("/clickup-webhook",methods=["POST"])
 def clickup_webhook():
@@ -359,9 +383,10 @@ def clickup_webhook():
     if is_duplicate(co, vos["email"]):
         return jsonify({"skip":True,"reason":"DUPLICATE"}),200
     cc_email = vos.get("alternate_email")
+    nob = bk.get('nature_of_business','')
     lines=["Dear Space Partner,","","Greetings, we have a Virtual Office booking for your Space.","",f"Company Name - {co}",f"Space Partner - {vk}",f"Authorized Signatory - {bk.get('signatory','')}",f"Location - {vos['address']}",f"Email - {bk.get('email','')}",f"Contact - {bk.get('phone','')}",f"Plan - {bk.get('plan','')}",]
     if bk.get("firm_type"): lines.append(f"Entity Type - {bk['firm_type']}")
-    if bk.get("nature_of_business"): lines.append(f"Business Description & Nature of Business - {bk['nature_of_business']}")
+    if nob: lines.append(f"Business Description & Nature of Business - {nob}")
     lines+=["\nPFA, the required documents, kindly share the Draft Agreement to proceed further.","\nThanks and Regards,","Naitik","Operation Associate","8368041681"]
     body="\n".join(lines); subj=f"Virtual Office Plan - {co}"
     atts=extract_attachments(data); dls=download_and_filter(atts)
