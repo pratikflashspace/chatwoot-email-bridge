@@ -162,33 +162,57 @@ def is_payment_pdf(content, name=""):
 
 def ocr_check_payment(content, name=""):
     if not HAS_OCR or not HAS_PIL: return None
-    try:
-        img = Image.open(io.BytesIO(content)).convert("RGB")
-        img.thumbnail((400, 400))
-        text = pytesseract.image_to_string(img, lang='eng', timeout=5)
-        del img; gc.collect()
-        if not text or len(text.strip()) < 5: return None
-        t = text.lower()
-        print(f"=== OCR ({name}): {t[:150].replace(chr(10),' ')} ===", file=sys.stderr)
-        for kw in KYC_OCR_KW:
-            if kw in t:
-                print(f"=== OCR: KYC ({kw}) SAFE ===", file=sys.stderr)
-                return False
-        has_rupee = any(s in text for s in ['\u20b9', 'INR', 'Rs.', 'Rs '])
-        pay_hits = [kw for kw in PAYMENT_OCR_KW if kw in t]
-        if len(pay_hits) >= 2:
-            print(f"=== OCR: PAYMENT ({pay_hits[:4]}) ===", file=sys.stderr)
-            return True
-        if has_rupee and pay_hits:
-            print(f"=== OCR: PAYMENT (rupee+{pay_hits[:3]}) ===", file=sys.stderr)
-            return True
-        return None
-    except Exception as e:
-        print(f"=== OCR FAIL ({name}): {e} ===", file=sys.stderr)
-        return None
+    for sz in [400, 200]:
+        try:
+            img = Image.open(io.BytesIO(content)).convert("RGB")
+            img.thumbnail((sz, sz))
+            text = pytesseract.image_to_string(img, lang='eng', timeout=5)
+            del img; gc.collect()
+            if not text or len(text.strip()) < 5:
+                if sz == 400:
+                    print(f"=== OCR ({name}): no text at {sz}px, retrying smaller ===", file=sys.stderr)
+                    continue
+                print(f"=== OCR ({name}): no text at {sz}px ===", file=sys.stderr)
+                return None
+            t = text.lower()
+            print(f"=== OCR ({name} @{sz}px): {t[:150].replace(chr(10),' ')} ===", file=sys.stderr)
+            # Check KYC first
+            for kw in KYC_OCR_KW:
+                if kw in t:
+                    print(f"=== OCR: KYC ({kw}) SAFE ===", file=sys.stderr)
+                    return False
+            # Check rupee amounts > 100 (strong payment signal)
+            amt_match = re.search(r'[\u20b9]\s*([\d,]+)', text) or re.search(r'(?:Rs\.?|INR)\s*([\d,]+)', text, re.IGNORECASE)
+            if amt_match:
+                try:
+                    amt = float(amt_match.group(1).replace(',', ''))
+                    if amt > 100:
+                        print(f"=== OCR: AMOUNT Rs.{amt} PAYMENT ===", file=sys.stderr)
+                        return True
+                except: pass
+            # Check payment keywords
+            has_rupee = any(s in text for s in ['\u20b9', 'INR', 'Rs.', 'Rs '])
+            pay_hits = [kw for kw in PAYMENT_OCR_KW if kw in t]
+            if len(pay_hits) >= 2:
+                print(f"=== OCR: PAYMENT ({pay_hits[:4]}) ===", file=sys.stderr)
+                return True
+            if has_rupee and pay_hits:
+                print(f"=== OCR: PAYMENT (rupee+{pay_hits[:3]}) ===", file=sys.stderr)
+                return True
+            return None
+        except Exception as e:
+            err_str = str(e).lower()
+            if "timeout" in err_str and sz == 400:
+                print(f"=== OCR timeout at {sz}px, retrying {sz//2}px ===", file=sys.stderr)
+                continue
+            print(f"=== OCR FAIL ({name}): {e} ===", file=sys.stderr)
+            return None
+    print(f"=== OCR FAIL ({name}): all sizes exhausted ===", file=sys.stderr)
+    return None
 
 def is_payment_image(content, img_meta=None):
     name = img_meta.get('title', '?') if img_meta else '?'
+    # OCR check (with retry at smaller size)
     ocr_result = ocr_check_payment(content, name)
     if ocr_result is True:
         print(f"=== VERDICT: PAYMENT (OCR) {name} ===", file=sys.stderr)
@@ -196,8 +220,10 @@ def is_payment_image(content, img_meta=None):
     if ocr_result is False:
         print(f"=== VERDICT: SAFE (OCR KYC) {name} ===", file=sys.stderr)
         return False
+    # OCR was inconclusive (timeout/error/no meaningful text)
+    ocr_failed = True
     score=0; w=int(img_meta.get("width",0)) if img_meta else 0; h=int(img_meta.get("height",0)) if img_meta else 0
-    gp=0; blp=0
+    gp=0; bp=0; wp=0
     if w>0 and h>0:
         ratio=h/w
         if ratio>1.7: score+=2
@@ -207,13 +233,21 @@ def is_payment_image(content, img_meta=None):
             img=Image.open(io.BytesIO(content)).convert("RGB"); img.thumbnail((200,200)); px=list(img.getdata()); n=len(px)
             if n>0:
                 gp=sum(1 for r,g,b in px if g>r*1.3 and g>b*1.3 and g>80)/n*100
-                blp=sum(1 for r,g,b in px if b>r*1.2 and b>g*1.1 and b>80)/n*100
+                bp=sum(1 for r,g,b in px if b>r*1.2 and b>g*1.1 and b>80)/n*100
+                wp=sum(1 for r,g,b in px if r>200 and g>200 and b>200)/n*100
+                # UPI green
                 if gp>5: score+=2
                 if gp>12: score+=1
-                if blp>15: score-=1
+                # Blue app theme (HDFC/SBI/PayTM) on white background
+                if bp>8 and wp>30: score+=1
+                if bp>15 and wp>20: score+=1
+                # White-heavy with any app color accent = screenshot/receipt
+                if wp>50 and (gp>3 or bp>5): score+=1
             del img, px; gc.collect()
         except: pass
-    print(f"=== IMG: score={score} {w}x{h} g={gp:.1f}% b={blp:.1f}% {name} ===",file=sys.stderr)
+    # OCR failure penalty: unknown text = mild suspicion
+    if ocr_failed: score+=1
+    print(f"=== IMG: score={score} {w}x{h} g={gp:.1f}% b={bp:.1f}% w={wp:.1f}% ocr=fail {name} ===",file=sys.stderr)
     return score>=2
 
 def is_duplicate(company, sp_email):
@@ -297,7 +331,7 @@ def create_conv(cid,subj):
     return r.json().get("id") if r.status_code in (200,201) else None
 
 @app.route("/health")
-def health(): return jsonify({"v":"10.0","ok":True,"ocr":HAS_OCR,"pil":HAS_PIL,"dedup":len(SENT_EMAILS)})
+def health(): return jsonify({"v":"10.1","ok":True,"ocr":HAS_OCR,"pil":HAS_PIL,"dedup":len(SENT_EMAILS)})
 
 @app.route("/clickup-webhook",methods=["POST"])
 def clickup_webhook():
