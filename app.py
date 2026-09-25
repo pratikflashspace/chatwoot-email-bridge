@@ -32,9 +32,10 @@ PAYMENT_NAME_KW = ["payment","amount","token amount","paid","transaction","recei
 PAYMENT_CONTENT_KW = ["payment successful","transaction id","transaction ref","utr no","utr:","upi ref","upi id","paid to","paid via","amount paid","total paid","razorpay","phonepe","google pay","paytm","bhim","bank transfer","neft ref","imps ref","credited","debited","account statement","bank statement","payment receipt","invoice amount","amount received","payment confirmation","order id","payment id","money transfer","fund transfer","transaction successful","txn id","amount debited","amount credited","net banking","total amount"]
 KYC_KEYWORDS = ["aadhaar","aadhar","pan card","permanent account number","income tax","election commission","voter id","passport","driving licence","driving license","identity card","uid","unique identification","govt of india","government of india","ministry of","certificate of incorporation","memorandum","articles of association","gst certificate","gstin","registration certificate","company pan"]
 SCREENSHOT_PDF_PATTERNS = [r'^image\s*\(\d+\)\.pdf$', r'^image\s*\d+\.pdf$', r'^screenshot', r'^img_', r'^photo_']
+KYC_PDF_NAME_KW = ["aadhaar","aadhar","pan","digilocker","certificate","incorporation","gst","gstin","moa","aoa","registration","llp","approval","memorandum","articles","voter","passport","driving","licence","license","udyam","msme","fssai","trade","shop","establishment","dipp","startup"]
 
 PAYMENT_OCR_KW = ["payment successful","transaction id","transaction ref","utr","upi ref","upi id","paid to","paid via","amount paid","total paid","razorpay","phonepe","google pay","paytm","bhim","bank transfer","neft","imps","credited","debited","payment receipt","amount received","payment confirmation","money transfer","fund transfer","net banking","bank statement","account statement","cash received","deposit slip","bank deposit"]
-KYC_OCR_KW = ["aadhaar","aadhar","pan card","permanent account number","income tax","election commission","govt of india","government of india","ministry of","unique identification","certificate of incorporation","memorandum","articles of association","gst certificate","gstin","registration certificate"]
+KYC_OCR_KW = ["aadhaar","aadhar","pan card","permanent account","income tax","incom","tax department","election commission","govt of india","government of india","ministry of","unique identification","certificate of incorp","memorandum","articles of assoc","gst certificate","gstin","registration cert","digilocker","voter","passport","driving"]
 
 _NONE = "__NONE__"
 VOS_MAPPING = {
@@ -126,6 +127,9 @@ def parse_booking(text):
     return b
 
 def is_payment_by_name(fn): return any(kw in fn.lower() for kw in PAYMENT_NAME_KW)
+def is_kyc_by_name(fn):
+    fl=fn.lower()
+    return any(kw in fl for kw in KYC_PDF_NAME_KW)
 def is_screenshot_pdf_name(fn):
     for pat in SCREENSHOT_PDF_PATTERNS:
         if re.match(pat, fn.lower().strip()): return True
@@ -139,20 +143,24 @@ def check_text_for_payment(text):
     return False
 
 def is_payment_pdf(content, name=""):
-    if is_screenshot_pdf_name(name): print(f"=== SCREENSHOT PDF: {name} ===",file=sys.stderr); return True
+    if is_screenshot_pdf_name(name): print(f"=== SCREENSHOT PDF name: {name} ===",file=sys.stderr); return True
     if not PdfReader or len(content)>MAX_PDF_SCAN: return False
     try:
         reader=PdfReader(io.BytesIO(content)); text=""
         for page in reader.pages[:2]:
             try: t=page.extract_text(); text+=t+" " if t else ""
             except: pass
-        if not text.strip() and len(content)<200*1024: print(f"=== SCREENSHOT PDF (empty): {name} ===",file=sys.stderr); return True
-        if text.strip() and check_text_for_payment(text): print(f"=== PAYMENT PDF: {name} ===",file=sys.stderr); return True
+        if not text.strip() and len(content)<200*1024:
+            if is_kyc_by_name(name):
+                print(f"=== PDF KYC by name (empty but safe): {name} ===",file=sys.stderr)
+                return False
+            print(f"=== SCREENSHOT PDF (empty unknown): {name} ===",file=sys.stderr)
+            return True
+        if text.strip() and check_text_for_payment(text): print(f"=== PAYMENT PDF text: {name} ===",file=sys.stderr); return True
     except: pass
     return False
 
 def ocr_check_payment(content, name=""):
-    """OCR with tiny resized image to save RAM. Returns True/False/None."""
     if not HAS_OCR or not HAS_PIL: return None
     try:
         img = Image.open(io.BytesIO(content)).convert("RGB")
@@ -181,7 +189,6 @@ def ocr_check_payment(content, name=""):
 
 def is_payment_image(content, img_meta=None):
     name = img_meta.get('title', '?') if img_meta else '?'
-    # Step 1: OCR (resized to 400px max, eng only, 5s timeout)
     ocr_result = ocr_check_payment(content, name)
     if ocr_result is True:
         print(f"=== VERDICT: PAYMENT (OCR) {name} ===", file=sys.stderr)
@@ -189,7 +196,6 @@ def is_payment_image(content, img_meta=None):
     if ocr_result is False:
         print(f"=== VERDICT: SAFE (OCR KYC) {name} ===", file=sys.stderr)
         return False
-    # Step 2: Color analysis fallback
     score=0; w=int(img_meta.get("width",0)) if img_meta else 0; h=int(img_meta.get("height",0)) if img_meta else 0
     gp=0; blp=0
     if w>0 and h>0:
@@ -291,7 +297,7 @@ def create_conv(cid,subj):
     return r.json().get("id") if r.status_code in (200,201) else None
 
 @app.route("/health")
-def health(): return jsonify({"v":"9.9","ok":True,"ocr":HAS_OCR,"pil":HAS_PIL,"dedup":len(SENT_EMAILS)})
+def health(): return jsonify({"v":"10.0","ok":True,"ocr":HAS_OCR,"pil":HAS_PIL,"dedup":len(SENT_EMAILS)})
 
 @app.route("/clickup-webhook",methods=["POST"])
 def clickup_webhook():
