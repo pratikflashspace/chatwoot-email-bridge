@@ -1,18 +1,10 @@
-import os, sys, json, re, requests, io, time, gc
+import os, sys, json, re, requests, io, time, gc, base64
 from flask import Flask, request, jsonify
 try:
-    from PyPDF2 import PdfReader
-except: PdfReader = None
-try:
-    from PIL import Image, ImageFilter, ImageEnhance
+    from PIL import Image
     HAS_PIL = True
 except:
     HAS_PIL = False
-try:
-    import pytesseract
-    HAS_OCR = True
-except:
-    HAS_OCR = False
 try:
     from pdf2image import convert_from_bytes
     HAS_PDF2IMG = True
@@ -27,43 +19,13 @@ CHATWOOT_INBOX_ID = int(os.environ.get("CHATWOOT_INBOX_ID", "35"))
 SERVICE_SECRET = os.environ.get("SERVICE_SECRET", "")
 CLICKUP_API_TOKEN = os.environ.get("CLICKUP_API_TOKEN", "")
 CLICKUP_TEAM_ID = os.environ.get("CLICKUP_TEAM_ID", "1851686")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 HEADERS = {"api_access_token": CHATWOOT_TOKEN, "Content-Type": "application/json"}
 
 SENT_EMAILS = {}
 DEDUP_WINDOW = 86400
 
 PAYMENT_NAME_KW = ["payment","amount","token amount","paid","transaction","receipt","invoice","bank statement","account statement","upi","neft","imps","flash space token"]
-
-PAYMENT_PATTERNS = [
-    r'[\u20b9]\s*[\d,]+\.?\d*',
-    r'(?:Rs\.?|INR)\s*[\d,]+\.?\d*',
-    r'(?:amount|total)\s*(?:paid|received|debited|credited)\s*[:=]?\s*[\d,]+',
-    r'(?:utr|upi\s*ref|transaction\s*(?:id|ref|no))\s*[:=]?\s*\w+',
-    r'(?:paid\s+to|paid\s+via|paid\s+from)\s*[:=]?\s*\w+',
-    r'payment\s+(?:successful|confirmed|received|completed)',
-    r'(?:credited|debited)\s+(?:to|from)\s+(?:your\s+)?(?:account|a/c|bank)',
-    r'(?:neft|imps|rtgs|upi)\s*[:=]?\s*\w+',
-]
-
-PAYMENT_KW = ["payment successful","transaction id","transaction ref","utr no","utr:","upi ref",
-    "upi id","paid to","paid via","amount paid","total paid","razorpay","phonepe","google pay",
-    "paytm","bhim","bank transfer","neft ref","imps ref","credited","debited","payment receipt",
-    "amount received","payment confirmation","order id","payment id","money transfer",
-    "fund transfer","net banking","total amount","bank statement","account statement",
-    "cash received","deposit slip","bank deposit","transaction successful","txn id",
-    "amount debited","amount credited"]
-
-KYC_KW = ["aadhaar","aadhar","pan card","permanent account","income tax","incom",
-    "tax department","election commission","govt of india","government of india",
-    "ministry of","unique identification","certificate of incorp","memorandum",
-    "articles of assoc","gst certificate","gstin","registration cert","digilocker",
-    "voter","passport","driving","aadhaar enrolment","uid","identity card",
-    "company pan","registered office","cin","llpin","partnership deed","trust deed"]
-
-KYC_PDF_NAME_KW = ["aadhaar","aadhar","pan","digilocker","certificate","incorporation",
-    "gst","gstin","moa","aoa","registration","llp","approval","memorandum","articles",
-    "voter","passport","driving","licence","license","udyam","msme","fssai","trade",
-    "shop","establishment","dipp","startup"]
 
 AMOUNT_STRIP_PATTERNS = [
     r'(?:VO\s*/\s*)?(?:Contract|Registration|Token|Advance|Remaining)\s*(?:Amount|Payment)\s*[:=\-]?\s*[\d,\.]+\s*(?:\+\s*gst|\+\s*GST|\+\s*tax)?\s*',
@@ -83,6 +45,123 @@ def sanitize_field(text):
     if result != text:
         print(f"=== SANITIZED: '{text}' -> '{result}' ===", file=sys.stderr)
     return result
+
+# ===================================================================
+# GEMINI VISION: See image like a human, classify payment
+# ===================================================================
+
+GEMINI_PROMPT = """Look at this image carefully. Your ONLY job is to classify it.
+
+Is this image a PAYMENT PROOF? Payment proof includes:
+- PhonePe/Google Pay/Paytm/BHIM payment screenshot
+- UPI transaction confirmation
+- Bank transfer confirmation (NEFT/RTGS/IMPS)
+- Payment receipt or payment successful screen
+- Bank statement showing payment
+- Any screenshot showing money was paid/transferred
+- QR code payment confirmation
+
+Respond with EXACTLY one word:
+- PAYMENT_PROOF (if this is payment/transaction related)
+- NOT_PAYMENT (if this is KYC doc like Aadhaar/PAN/GST/agreement/NOC/incorporation certificate/any non-payment document)
+- UNCERTAIN (if you cannot determine)
+
+One word only. No explanation."""
+
+def gemini_classify_image(image_bytes, name="?"):
+    if not GEMINI_API_KEY:
+        print(f"=== GEMINI: no API key, defaulting BLOCK {name} ===", file=sys.stderr)
+        return "UNCERTAIN"
+    try:
+        b64 = base64.b64encode(image_bytes).decode('utf-8')
+        mime = "image/jpeg"
+        if image_bytes[:4] == b'\x89PNG': mime = "image/png"
+        elif image_bytes[:4] == b'RIFF': mime = "image/webp"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": GEMINI_PROMPT},
+                    {"inline_data": {"mime_type": mime, "data": b64}}
+                ]
+            }],
+            "generationConfig": {"temperature": 0, "maxOutputTokens": 10}
+        }
+        r = requests.post(url, json=payload, timeout=15)
+        if r.status_code != 200:
+            print(f"=== GEMINI ERROR ({name}): {r.status_code} {r.text[:200]} ===", file=sys.stderr)
+            return "UNCERTAIN"
+        resp = r.json()
+        text = resp.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip().upper()
+        if "PAYMENT_PROOF" in text:
+            result = "PAYMENT_PROOF"
+        elif "NOT_PAYMENT" in text:
+            result = "NOT_PAYMENT"
+        else:
+            result = "UNCERTAIN"
+        print(f"=== GEMINI ({name}): {result} (raw: {text[:50]}) ===", file=sys.stderr)
+        return result
+    except Exception as e:
+        print(f"=== GEMINI FAIL ({name}): {e} ===", file=sys.stderr)
+        return "UNCERTAIN"
+
+# ===================================================================
+# FILE CLASSIFICATION: Open every file, show to Gemini
+# ===================================================================
+
+def image_to_jpeg_bytes(img, quality=85):
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format='JPEG', quality=quality)
+    return buf.getvalue()
+
+def should_block_pdf(content, name=""):
+    if is_payment_by_name(name):
+        print(f"=== BLOCK PDF (name): {name} ===", file=sys.stderr)
+        return True
+    if not HAS_PDF2IMG:
+        print(f"=== PDF no pdf2image, defaulting BLOCK: {name} ===", file=sys.stderr)
+        return True
+    try:
+        images = convert_from_bytes(content, first_page=1, last_page=3, dpi=150, size=(800, None))
+        for i, img in enumerate(images):
+            jpeg_bytes = image_to_jpeg_bytes(img)
+            result = gemini_classify_image(jpeg_bytes, f"{name}_p{i+1}")
+            del jpeg_bytes; gc.collect()
+            if result in ("PAYMENT_PROOF", "UNCERTAIN"):
+                print(f"=== BLOCK PDF (gemini {result}): {name} page {i+1} ===", file=sys.stderr)
+                del images; gc.collect()
+                return True
+        del images; gc.collect()
+        print(f"=== ALLOW PDF (gemini): {name} ===", file=sys.stderr)
+        return False
+    except Exception as e:
+        print(f"=== PDF error ({name}): {e}, defaulting BLOCK ===", file=sys.stderr)
+        return True
+
+def should_block_image(content, name=""):
+    if is_payment_by_name(name):
+        print(f"=== BLOCK IMG (name): {name} ===", file=sys.stderr)
+        return True
+    try:
+        if HAS_PIL:
+            img = Image.open(io.BytesIO(content))
+            img.thumbnail((1200, 1200))
+            jpeg_bytes = image_to_jpeg_bytes(img)
+            del img; gc.collect()
+        else:
+            jpeg_bytes = content
+    except:
+        jpeg_bytes = content
+    result = gemini_classify_image(jpeg_bytes, name)
+    del jpeg_bytes; gc.collect()
+    if result in ("PAYMENT_PROOF", "UNCERTAIN"):
+        print(f"=== BLOCK IMG (gemini {result}): {name} ===", file=sys.stderr)
+        return True
+    print(f"=== ALLOW IMG (gemini): {name} ===", file=sys.stderr)
+    return False
+
+def is_payment_by_name(fn):
+    return any(kw in fn.lower() for kw in PAYMENT_NAME_KW)
 
 _NONE = "__NONE__"
 VOS_MAPPING = {
@@ -174,121 +253,6 @@ def parse_booking(text):
     for k in b: b[k] = sanitize_field(b[k])
     return b
 
-def ocr_image_bytes(content, name="?", max_size=800):
-    """OCR with enhanced preprocessing: grayscale, sharpen, contrast, multi-PSM."""
-    if not HAS_OCR or not HAS_PIL: return ""
-    for sz in [max_size, max_size // 2]:
-        try:
-            img = Image.open(io.BytesIO(content))
-            img = img.convert("L")
-            img.thumbnail((sz, sz))
-            img = ImageEnhance.Contrast(img).enhance(1.5)
-            img = img.filter(ImageFilter.SHARPEN)
-            for psm in [6, 3]:
-                try:
-                    cfg = f'--psm {psm} --oem 3'
-                    text = pytesseract.image_to_string(img, lang='eng', timeout=10, config=cfg)
-                    if text and len(text.strip()) >= 3:
-                        print(f"=== OCR ({name} @{sz}px psm{psm}): {text[:120].replace(chr(10),' ')} ===", file=sys.stderr)
-                        del img; gc.collect()
-                        return text
-                except Exception as e:
-                    if "timeout" in str(e).lower():
-                        print(f"=== OCR timeout ({name}) psm{psm} @{sz}px ===", file=sys.stderr)
-                        continue
-                    raise
-            del img; gc.collect()
-            if sz == max_size:
-                print(f"=== OCR ({name}): no text at {sz}px, retry {sz//2}px ===", file=sys.stderr)
-                continue
-        except Exception as e:
-            if "timeout" in str(e).lower() and sz == max_size:
-                print(f"=== OCR timeout ({name}) at {sz}px, retry {sz//2}px ===", file=sys.stderr)
-                gc.collect()
-                continue
-            print(f"=== OCR error ({name}): {e} ===", file=sys.stderr)
-            gc.collect()
-            return ""
-    return ""
-
-def extract_text_from_pdf(content, name="?"):
-    text = ""
-    if PdfReader:
-        try:
-            reader = PdfReader(io.BytesIO(content))
-            for page in reader.pages[:3]:
-                try:
-                    t = page.extract_text()
-                    if t: text += t + " "
-                except: pass
-        except: pass
-    if text.strip():
-        print(f"=== PDF text ({name}): {text[:120].replace(chr(10),' ')} ===", file=sys.stderr)
-        return text
-    if HAS_PDF2IMG:
-        try:
-            images = convert_from_bytes(content, first_page=1, last_page=2, dpi=200, size=(1000, None))
-            for i, pimg in enumerate(images):
-                buf = io.BytesIO()
-                pimg.save(buf, format='JPEG', quality=85)
-                ocr_text = ocr_image_bytes(buf.getvalue(), f"{name}_p{i+1}", max_size=800)
-                if ocr_text: text += ocr_text + " "
-                del buf; gc.collect()
-            del images; gc.collect()
-        except Exception as e:
-            print(f"=== pdf2image error ({name}): {e} ===", file=sys.stderr)
-    if text.strip():
-        print(f"=== PDF OCR ({name}): {text[:120].replace(chr(10),' ')} ===", file=sys.stderr)
-    else:
-        print(f"=== PDF empty ({name}): no text extracted ===", file=sys.stderr)
-    return text
-
-def extract_text_from_image(content, name="?"):
-    return ocr_image_bytes(content, name, max_size=800)
-
-def is_payment_by_name(fn):
-    return any(kw in fn.lower() for kw in PAYMENT_NAME_KW)
-
-def is_payment_text(text):
-    if not text or len(text.strip()) < 5:
-        return False, "no_text"
-    t = text.lower()
-    for kw in KYC_KW:
-        if kw in t:
-            return False, f"kyc:{kw}"
-    for pat in PAYMENT_PATTERNS:
-        m = re.search(pat, text, re.IGNORECASE)
-        if m:
-            return True, f"regex:{m.group()[:40]}"
-    hits = [kw for kw in PAYMENT_KW if kw in t]
-    if len(hits) >= 2:
-        return True, f"kw:{hits[:3]}"
-    return False, "clean"
-
-def should_block_pdf(content, name=""):
-    if is_payment_by_name(name):
-        print(f"=== BLOCK PDF (name): {name} ===", file=sys.stderr)
-        return True
-    text = extract_text_from_pdf(content, name)
-    is_pay, reason = is_payment_text(text)
-    if is_pay:
-        print(f"=== BLOCK PDF (text): {name} [{reason}] ===", file=sys.stderr)
-        return True
-    print(f"=== ALLOW PDF: {name} [{reason}] ===", file=sys.stderr)
-    return False
-
-def should_block_image(content, name="", meta=None):
-    if is_payment_by_name(name):
-        print(f"=== BLOCK IMG (name): {name} ===", file=sys.stderr)
-        return True
-    text = extract_text_from_image(content, name)
-    is_pay, reason = is_payment_text(text)
-    if is_pay:
-        print(f"=== BLOCK IMG (text): {name} [{reason}] ===", file=sys.stderr)
-        return True
-    print(f"=== ALLOW IMG: {name} [{reason}] ===", file=sys.stderr)
-    return False
-
 def is_duplicate(company, sp_email):
     key = f"{company.lower().strip()}|{sp_email.lower().strip()}"
     now = time.time()
@@ -332,7 +296,7 @@ def download_and_filter(atts):
             if is_pdf:
                 if should_block_pdf(c, a["name"]): continue
             elif a["type"]=="image":
-                if should_block_image(c, a["name"], a.get("meta",{})): continue
+                if should_block_image(c, a["name"]): continue
             res.append({"name":a["name"],"content":c,"ct":ct})
             print(f"=== OK: {a['name']} ({len(c)}b) ===",file=sys.stderr)
         except Exception as e:
@@ -373,7 +337,7 @@ def create_conv(cid,subj):
     return r.json().get("id") if r.status_code in (200,201) else None
 
 @app.route("/health")
-def health(): return jsonify({"v":"11.2","ok":True,"ocr":HAS_OCR,"pil":HAS_PIL,"pdf2img":HAS_PDF2IMG,"dedup":len(SENT_EMAILS)})
+def health(): return jsonify({"v":"12.0","ok":True,"gemini":bool(GEMINI_API_KEY),"pdf2img":HAS_PDF2IMG,"dedup":len(SENT_EMAILS)})
 
 @app.route("/clickup-webhook",methods=["POST"])
 def clickup_webhook():
