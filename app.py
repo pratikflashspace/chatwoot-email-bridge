@@ -221,6 +221,7 @@ def analyze_visual_signals(content, meta, name="?"):
         'phone_ratio': False,
         'app_header_band': False,
         'payment_colors': False,
+        'govt_uniform': False,
         'receipt_layout': False,
         'document_like': False,
     }
@@ -268,16 +269,28 @@ def analyze_visual_signals(content, meta, name="?"):
                 details['hdr'] = f'b{tbp:.0f}g{tgp:.0f}p{tpp:.0f}c{tcp:.0f}'
                 if tbp > 35 or tgp > 30 or tpp > 25 or tcp > 50:
                     signals['app_header_band'] = True
-        # --- Payment colors ---
-        if gp > 5 or bp > 8 or pp > 5:
+        # --- Govt uniform color (Aadhaar = solid blue, >50% single color, low white) ---
+        if (bp > 50 and wp < 15) or (gp > 40 and wp < 15):
+            signals['govt_uniform'] = True
+            signals['app_header_band'] = False
+        # --- Payment colors (blue ONLY when white > 20%, apps = colored header + white body) ---
+        blue_pay = bp > 8 and wp > 20
+        green_pay = gp > 8
+        purple_pay = pp > 5
+        if blue_pay or green_pay or purple_pay:
             signals['payment_colors'] = True
         # --- Receipt layout (white + colored accents) ---
         if wp > 45 and signals['payment_colors']:
             signals['receipt_layout'] = True
-        # --- Document-like (neutral colors, no app UI) ---
-        if np_ > 55 and not signals['app_header_band'] and not signals['payment_colors']:
+        # --- Document-like (generous: neutral > 50 always, > 40 when no app signals) ---
+        no_app = not signals['app_header_band'] and not signals['payment_colors']
+        if np_ > 50:
+            signals['document_like'] = True
+        elif np_ > 40 and no_app:
             signals['document_like'] = True
         elif wp > 60 and gp < 2 and bp < 3 and pp < 2:
+            signals['document_like'] = True
+        if signals['govt_uniform']:
             signals['document_like'] = True
         del img, px; gc.collect()
     except Exception as e:
@@ -314,13 +327,14 @@ def classify_image(content, meta, name="?"):
     if signals['phone_ratio']:       score += 1; reasons.append('phone_ratio(+1)')
     if signals['receipt_layout']:    score += 1; reasons.append('receipt(+1)')
     if signals['document_like']:     score -= 2; reasons.append('document(-2)')
+    if signals.get('govt_uniform'):  score -= 1; reasons.append('govt(-1)')
     score += 1; reasons.append('ocr_fail(+1)')
 
     print(f"=== L3 SCORE={score} [{', '.join(reasons)}] ===", file=sys.stderr)
 
     if score >= 3:
         cls = 'PAYMENT_PROOF'; conf = 'medium'
-    elif score <= -1:
+    elif score <= 1:
         cls = 'BUSINESS_DOCUMENT'; conf = 'low'
     else:
         cls = 'UNKNOWN'; conf = 'low'
@@ -424,7 +438,7 @@ def create_conv(cid,subj):
     return r.json().get("id") if r.status_code in (200,201) else None
 
 @app.route("/health")
-def health(): return jsonify({"v":"10.2","ok":True,"ocr":HAS_OCR,"pil":HAS_PIL,"dedup":len(SENT_EMAILS)})
+def health(): return jsonify({"v":"10.3","ok":True,"ocr":HAS_OCR,"pil":HAS_PIL,"dedup":len(SENT_EMAILS)})
 
 @app.route("/clickup-webhook",methods=["POST"])
 def clickup_webhook():
