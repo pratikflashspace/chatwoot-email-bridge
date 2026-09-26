@@ -1,4 +1,4 @@
-import os, sys, json, re, requests, io, time, gc, base64
+import os, sys, json, re, requests, io, time, gc, base64, threading
 from flask import Flask, request, jsonify
 try:
     from PIL import Image
@@ -73,7 +73,7 @@ def gemini_classify_image(image_bytes, name="?"):
         mime = "image/jpeg"
         if image_bytes[:4] == b'\x89PNG': mime = "image/png"
         elif image_bytes[:4] == b'RIFF': mime = "image/webp"
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_API_KEY}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
         payload = {
             "contents": [{
                 "parts": [
@@ -81,21 +81,27 @@ def gemini_classify_image(image_bytes, name="?"):
                     {"inline_data": {"mime_type": mime, "data": b64}}
                 ]
             }],
-            "generationConfig": {"temperature": 0, "maxOutputTokens": 10}
+            "generationConfig": {"temperature": 0, "maxOutputTokens": 20}
         }
-        r = requests.post(url, json=payload, timeout=15)
+        r = requests.post(url, json=payload, timeout=30)
         if r.status_code != 200:
             print(f"=== GEMINI ERROR ({name}): {r.status_code} {r.text[:200]} ===", file=sys.stderr)
             return "UNCERTAIN"
         resp = r.json()
-        text = resp.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip().upper()
-        if "PAYMENT_PROOF" in text:
+        # Extract text from all parts (skip thinking parts)
+        all_text = ""
+        for candidate in resp.get("candidates", []):
+            for part in candidate.get("content", {}).get("parts", []):
+                if "text" in part:
+                    all_text += part["text"] + " "
+        all_text = all_text.strip().upper()
+        if "PAYMENT_PROOF" in all_text:
             result = "PAYMENT_PROOF"
-        elif "NOT_PAYMENT" in text:
+        elif "NOT_PAYMENT" in all_text:
             result = "NOT_PAYMENT"
         else:
             result = "UNCERTAIN"
-        print(f"=== GEMINI ({name}): {result} (raw: {text[:50]}) ===", file=sys.stderr)
+        print(f"=== GEMINI ({name}): {result} (raw: {all_text[:60]}) ===", file=sys.stderr)
         return result
     except Exception as e:
         print(f"=== GEMINI FAIL ({name}): {e} ===", file=sys.stderr)
@@ -328,8 +334,43 @@ def create_conv(cid,subj):
     r=requests.post(f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations",headers=HEADERS,json={"inbox_id":CHATWOOT_INBOX_ID,"contact_id":cid,"status":"open","additional_attributes":aa})
     return r.json().get("id") if r.status_code in (200,201) else None
 
+def process_booking_async(data):
+    """Process booking in background thread (no timeout from ClickUp)."""
+    try:
+        text=data["payload"]["data"]["text_content"]
+        bk=parse_booking(text)
+        sp,loc,co=bk.get("space_partner",""),bk.get("location",""),bk.get("company_name","")
+        print(f"=== co={co} sp={sp} loc={loc} ===",file=sys.stderr)
+        if not sp or not co or "pending" in co.lower(): return
+        vk,skip=match_space_partner(sp,loc)
+        if not vk: return
+        vos=VOS_MAPPING.get(vk)
+        if not vos or not vos.get("email"): return
+        if is_duplicate(co, vos["email"]): return
+        cc_email = vos.get("alternate_email")
+        nob = bk.get('nature_of_business','')
+        lines=["Dear Space Partner,","","Greetings, we have a Virtual Office booking for your Space.","",f"Company Name - {co}",f"Space Partner - {vk}",f"Authorized Signatory - {bk.get('signatory','')}",f"Location - {vos['address']}",f"Email - {bk.get('email','')}",f"Contact - {bk.get('phone','')}",f"Plan - {bk.get('plan','')}",]
+        if bk.get("firm_type"): lines.append(f"Entity Type - {bk['firm_type']}")
+        if nob: lines.append(f"Business Description & Nature of Business - {nob}")
+        lines+=["\nPFA, the required documents, kindly share the Draft Agreement to proceed further.","\nThanks and Regards,","Naitik","Operation Associate","8368041681"]
+        body="\n".join(lines); subj=f"Virtual Office Plan - {co}"
+        atts=extract_attachments(data); dls=download_and_filter(atts)
+        print(f"=== SEND {vos['email']} CC={cc_email or 'none'}: {len(dls)}/{len(atts)} ===",file=sys.stderr)
+        cid=find_or_create_contact(vos["email"],vk)
+        if not cid: print(f"=== ERROR: contact creation failed ===",file=sys.stderr); return
+        conv=create_conv(cid,subj)
+        if not conv: print(f"=== ERROR: conversation creation failed ===",file=sys.stderr); return
+        res=send_chatwoot(conv,body,dls,cc_email=cc_email)
+        if "error" not in res:
+            mark_sent(co, vos["email"])
+            print(f"=== DONE: {co} -> {vos['email']} ===",file=sys.stderr)
+        else:
+            print(f"=== ERROR: chatwoot send failed: {res} ===",file=sys.stderr)
+    except Exception as e:
+        print(f"=== ASYNC ERROR: {e} ===",file=sys.stderr)
+
 @app.route("/health")
-def health(): return jsonify({"v":"12.1","ok":True,"gemini":bool(GEMINI_API_KEY),"pdf2img":HAS_PDF2IMG,"dedup":len(SENT_EMAILS)})
+def health(): return jsonify({"v":"12.2","ok":True,"gemini":bool(GEMINI_API_KEY),"pdf2img":HAS_PDF2IMG,"dedup":len(SENT_EMAILS)})
 
 @app.route("/clickup-webhook",methods=["POST"])
 def clickup_webhook():
@@ -339,32 +380,9 @@ def clickup_webhook():
     try: text=data["payload"]["data"]["text_content"]
     except: return jsonify({"skip":True}),200
     if "new booking" not in text.lower(): return jsonify({"skip":True}),200
-    bk=parse_booking(text)
-    sp,loc,co=bk.get("space_partner",""),bk.get("location",""),bk.get("company_name","")
-    print(f"=== co={co} sp={sp} loc={loc} ===",file=sys.stderr)
-    if not sp or not co or "pending" in co.lower(): return jsonify({"skip":True}),200
-    vk,skip=match_space_partner(sp,loc)
-    if not vk: return jsonify({"skip":True,"r":skip}),200
-    vos=VOS_MAPPING.get(vk)
-    if not vos or not vos.get("email"): return jsonify({"skip":True}),200
-    if is_duplicate(co, vos["email"]):
-        return jsonify({"skip":True,"reason":"DUPLICATE"}),200
-    cc_email = vos.get("alternate_email")
-    nob = bk.get('nature_of_business','')
-    lines=["Dear Space Partner,","","Greetings, we have a Virtual Office booking for your Space.","",f"Company Name - {co}",f"Space Partner - {vk}",f"Authorized Signatory - {bk.get('signatory','')}",f"Location - {vos['address']}",f"Email - {bk.get('email','')}",f"Contact - {bk.get('phone','')}",f"Plan - {bk.get('plan','')}",]
-    if bk.get("firm_type"): lines.append(f"Entity Type - {bk['firm_type']}")
-    if nob: lines.append(f"Business Description & Nature of Business - {nob}")
-    lines+=["\nPFA, the required documents, kindly share the Draft Agreement to proceed further.","\nThanks and Regards,","Naitik","Operation Associate","8368041681"]
-    body="\n".join(lines); subj=f"Virtual Office Plan - {co}"
-    atts=extract_attachments(data); dls=download_and_filter(atts)
-    print(f"=== SEND {vos['email']} CC={cc_email or 'none'}: {len(dls)}/{len(atts)} ===",file=sys.stderr)
-    cid=find_or_create_contact(vos["email"],vk)
-    if not cid: return jsonify({"error":"contact"}),500
-    conv=create_conv(cid,subj)
-    if not conv: return jsonify({"error":"conv"}),500
-    res=send_chatwoot(conv,body,dls,cc_email=cc_email)
-    if "error" in res: return jsonify(res),500
-    mark_sent(co, vos["email"])
-    return jsonify({"ok":True,"to":vos["email"],"cc":cc_email,"sent":len(dls),"found":len(atts)})
+    # Process in background thread to avoid ClickUp 15s timeout
+    t = threading.Thread(target=process_booking_async, args=(data,))
+    t.start()
+    return jsonify({"ok":True,"async":True}),200
 
 if __name__=="__main__": app.run(host="0.0.0.0",port=int(os.environ.get("PORT",10000)))
