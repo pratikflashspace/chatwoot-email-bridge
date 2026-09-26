@@ -46,10 +46,6 @@ def sanitize_field(text):
         print(f"=== SANITIZED: '{text}' -> '{result}' ===", file=sys.stderr)
     return result
 
-# ===================================================================
-# GEMINI VISION: See image like a human, classify payment
-# ===================================================================
-
 GEMINI_PROMPT = """Look at this image carefully. Your ONLY job is to classify it.
 
 Is this image a PAYMENT PROOF? Payment proof includes:
@@ -77,7 +73,7 @@ def gemini_classify_image(image_bytes, name="?"):
         mime = "image/jpeg"
         if image_bytes[:4] == b'\x89PNG': mime = "image/png"
         elif image_bytes[:4] == b'RIFF': mime = "image/webp"
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_API_KEY}"
         payload = {
             "contents": [{
                 "parts": [
@@ -104,10 +100,6 @@ def gemini_classify_image(image_bytes, name="?"):
     except Exception as e:
         print(f"=== GEMINI FAIL ({name}): {e} ===", file=sys.stderr)
         return "UNCERTAIN"
-
-# ===================================================================
-# FILE CLASSIFICATION: Open every file, show to Gemini
-# ===================================================================
 
 def image_to_jpeg_bytes(img, quality=85):
     buf = io.BytesIO()
@@ -337,7 +329,7 @@ def create_conv(cid,subj):
     return r.json().get("id") if r.status_code in (200,201) else None
 
 @app.route("/health")
-def health(): return jsonify({"v":"12.0","ok":True,"gemini":bool(GEMINI_API_KEY),"pdf2img":HAS_PDF2IMG,"dedup":len(SENT_EMAILS)})
+def health(): return jsonify({"v":"12.1","ok":True,"gemini":bool(GEMINI_API_KEY),"pdf2img":HAS_PDF2IMG,"dedup":len(SENT_EMAILS)})
 
 @app.route("/clickup-webhook",methods=["POST"])
 def clickup_webhook():
