@@ -1,13 +1,10 @@
 """
-Chatwoot MCP Server v1.0
+Chatwoot MCP Server v1.1
 Exposes Chatwoot email operations as MCP tools for ClickUp Super Agents.
+Uses native FastMCP SSE transport for ClickUp compatibility.
 """
 import os, json, httpx
 from mcp.server.fastmcp import FastMCP
-from starlette.applications import Starlette
-from starlette.routing import Mount, Route
-from starlette.responses import JSONResponse
-import uvicorn
 
 # ── Config ──────────────────────────────────────────────────
 CHATWOOT_URL = os.environ.get("CHATWOOT_URL", "https://support.stirringminds.com")
@@ -203,21 +200,7 @@ async def list_contact_conversations(email: str) -> str:
         return json.dumps({"error": f"Failed: {r.status_code}"})
 
 
-# ── Health + ASGI app ───────────────────────────────────────
-async def health(request):
-    return JSONResponse({
-        "status": "ok",
-        "server": "chatwoot-mcp",
-        "version": "1.0",
-        "chatwoot": CHATWOOT_URL,
-        "has_token": bool(CHATWOOT_TOKEN),
-    })
-
-app = Starlette(routes=[
-    Route("/health", health),
-    Mount("/", app=mcp.sse_app()),
-])
-
+# ── Run ─────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    mcp.run(transport="sse", host="0.0.0.0", port=port)
