@@ -1,7 +1,6 @@
 """
-Chatwoot MCP Server v1.1
+Chatwoot MCP Server v1.2
 Exposes Chatwoot email operations as MCP tools for ClickUp Super Agents.
-Uses native FastMCP SSE transport for ClickUp compatibility.
 """
 import os, json, httpx
 from mcp.server.fastmcp import FastMCP
@@ -12,9 +11,12 @@ CHATWOOT_TOKEN = os.environ.get("CHATWOOT_TOKEN", "")
 CHATWOOT_ACCOUNT_ID = os.environ.get("CHATWOOT_ACCOUNT_ID", "1")
 CHATWOOT_INBOX_ID = int(os.environ.get("CHATWOOT_INBOX_ID", "35"))
 CLICKUP_API_TOKEN = os.environ.get("CLICKUP_API_TOKEN", "")
+PORT = int(os.environ.get("PORT", 10000))
 
 # ── MCP Server ──────────────────────────────────────────────
 mcp = FastMCP("Chatwoot")
+mcp.settings.host = "0.0.0.0"
+mcp.settings.port = PORT
 
 def _headers():
     return {"api_access_token": CHATWOOT_TOKEN, "Content-Type": "application/json"}
@@ -202,5 +204,4 @@ async def list_contact_conversations(email: str) -> str:
 
 # ── Run ─────────────────────────────────────────────────────
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    mcp.run(transport="sse", host="0.0.0.0", port=port)
+    mcp.run(transport="sse")
