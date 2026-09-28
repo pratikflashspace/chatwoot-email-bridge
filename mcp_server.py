@@ -1,15 +1,10 @@
 """
-Chatwoot MCP Server v2.0
+Chatwoot MCP Server v2.1
 Exposes Chatwoot email operations as MCP tools for ClickUp Super Agents.
 Uses MCP SDK v2 with Streamable HTTP transport.
 """
 import os, json, httpx
-
-# Try v2 API first (MCPServer), fall back to v1 (FastMCP)
-try:
-    from mcp.server.fastmcp import FastMCP as MCPServer
-except (ImportError, ModuleNotFoundError):
-    from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import MCPServer
 
 # ── Config ──────────────────────────────────────────────────
 CHATWOOT_URL = os.environ.get("CHATWOOT_URL", "https://support.stirringminds.com")
@@ -20,7 +15,7 @@ CLICKUP_API_TOKEN = os.environ.get("CLICKUP_API_TOKEN", "")
 PORT = int(os.environ.get("PORT", 10000))
 
 # ── MCP Server ──────────────────────────────────────────────
-mcp = MCPServer("Chatwoot", stateless_http=True)
+mcp = MCPServer("Chatwoot")
 
 def _headers():
     return {"api_access_token": CHATWOOT_TOKEN, "Content-Type": "application/json"}
