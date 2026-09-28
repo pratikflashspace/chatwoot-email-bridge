@@ -1,9 +1,15 @@
 """
-Chatwoot MCP Server v1.2
+Chatwoot MCP Server v2.0
 Exposes Chatwoot email operations as MCP tools for ClickUp Super Agents.
+Uses MCP SDK v2 with Streamable HTTP transport.
 """
 import os, json, httpx
-from mcp.server.fastmcp import FastMCP
+
+# Try v2 API first (MCPServer), fall back to v1 (FastMCP)
+try:
+    from mcp.server.fastmcp import FastMCP as MCPServer
+except (ImportError, ModuleNotFoundError):
+    from mcp.server.mcpserver import MCPServer
 
 # ── Config ──────────────────────────────────────────────────
 CHATWOOT_URL = os.environ.get("CHATWOOT_URL", "https://support.stirringminds.com")
@@ -14,9 +20,7 @@ CLICKUP_API_TOKEN = os.environ.get("CLICKUP_API_TOKEN", "")
 PORT = int(os.environ.get("PORT", 10000))
 
 # ── MCP Server ──────────────────────────────────────────────
-mcp = FastMCP("Chatwoot")
-mcp.settings.host = "0.0.0.0"
-mcp.settings.port = PORT
+mcp = MCPServer("Chatwoot", stateless_http=True)
 
 def _headers():
     return {"api_access_token": CHATWOOT_TOKEN, "Content-Type": "application/json"}
@@ -92,7 +96,7 @@ async def send_email(
         conversation_id: Chatwoot conversation ID
         body: Full email body text
         cc_email: CC email address (optional)
-        attachment_urls: JSON array of URLs to download and attach, e.g. '["https://...","https://..."]'
+        attachment_urls: JSON array of URLs to download and attach
     """
     url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
     urls = json.loads(attachment_urls) if isinstance(attachment_urls, str) else attachment_urls
@@ -204,4 +208,4 @@ async def list_contact_conversations(email: str) -> str:
 
 # ── Run ─────────────────────────────────────────────────────
 if __name__ == "__main__":
-    mcp.run(transport="sse")
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=PORT)
