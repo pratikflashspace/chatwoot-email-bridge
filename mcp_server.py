@@ -1,9 +1,9 @@
 """
-Chatwoot MCP Server v2.1
+Chatwoot MCP Server v2.2
 Exposes Chatwoot email operations as MCP tools for ClickUp Super Agents.
-Uses MCP SDK v2 with Streamable HTTP transport.
+Fix: attachments now sent as proper email attachments, not inline base64.
 """
-import os, json, httpx
+import os, json, re, httpx
 from mcp.server.mcpserver import MCPServer
 
 # ── Config ──────────────────────────────────────────────────
@@ -19,6 +19,29 @@ mcp = MCPServer("Chatwoot")
 
 def _headers():
     return {"api_access_token": CHATWOOT_TOKEN, "Content-Type": "application/json"}
+
+
+def _guess_ext(ct):
+    """Guess file extension from content-type."""
+    mapping = {
+        "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
+        "application/pdf": ".pdf", "application/msword": ".doc",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    }
+    return mapping.get(ct.split(";")[0].strip().lower(), "")
+
+
+def _clean_filename(name, ct):
+    """Ensure filename has a proper extension."""
+    if not name or name == "file":
+        ext = _guess_ext(ct)
+        return f"document{ext}" if ext else "document"
+    # If name has no extension, add one from content-type
+    if "." not in name.split("/")[-1]:
+        ext = _guess_ext(ct)
+        if ext:
+            name = name + ext
+    return name
 
 
 @mcp.tool()
@@ -85,7 +108,7 @@ async def send_email(
 ) -> str:
     """
     Send an outgoing email in a Chatwoot conversation with optional attachments.
-    Attachments are downloaded from the provided URLs and forwarded.
+    Attachments are downloaded from the provided URLs and forwarded as proper email attachments.
 
     Args:
         conversation_id: Chatwoot conversation ID
@@ -106,31 +129,37 @@ async def send_email(
                         hdrs["Authorization"] = CLICKUP_API_TOKEN
                     r = await c.get(att_url, headers=hdrs)
                     if r.status_code == 200 and len(r.content) > 50:
+                        ct = r.headers.get("content-type", "application/octet-stream").split(";")[0].strip()
+                        # Extract filename from content-disposition or URL
                         cd = r.headers.get("content-disposition", "")
                         if "filename=" in cd:
-                            name = cd.split("filename=")[-1].strip('" ')
+                            name = re.search(r'filename[*]?=["\']?([^"\';\s]+)', cd)
+                            name = name.group(1) if name else "file"
                         else:
                             name = att_url.split("/")[-1].split("?")[0] or "file"
-                        ct = r.headers.get("content-type", "application/octet-stream")
+                        name = _clean_filename(name, ct)
                         files.append({"name": name, "content": r.content, "ct": ct})
                 except Exception:
                     pass
 
     async with httpx.AsyncClient(timeout=60) as c:
         if files:
-            form = {"content": body, "message_type": "outgoing", "content_type": "input_email"}
+            # Send as outgoing message WITHOUT content_type=input_email
+            # This ensures attachments are proper email attachments, not inline base64
+            form = {"content": body, "message_type": "outgoing"}
             if cc_email:
                 form["cc_emails"] = cc_email
             mf = [("attachments[]", (f["name"], f["content"], f["ct"])) for f in files]
             r = await c.post(url, headers={"api_access_token": CHATWOOT_TOKEN}, data=form, files=mf)
         else:
-            payload = {"content": body, "message_type": "outgoing", "content_type": "input_email"}
+            payload = {"content": body, "message_type": "outgoing"}
             if cc_email:
                 payload["cc_emails"] = cc_email
             r = await c.post(url, headers=_headers(), json=payload)
 
         if r.status_code in (200, 201):
-            return json.dumps({"sent": True, "attachments_count": len(files)})
+            fnames = [f["name"] for f in files]
+            return json.dumps({"sent": True, "attachments_count": len(files), "filenames": fnames})
         return json.dumps({"error": f"Send failed: {r.status_code} {r.text[:200]}"})
 
 
